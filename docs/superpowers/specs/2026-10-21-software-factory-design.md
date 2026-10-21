@@ -187,7 +187,15 @@ Missing `.factory.yml` → job goes to `factory::blocked` with instructions.
 7. CI intake snippets, Slack notify.
 8. E2E smoke on sandbox repos; docs.
 
-## 12. Open questions (defaults chosen; change if you disagree)
+## 12. Amendments from API verification (2026-10-21)
+- **Agents run as child processes.** A hook may spend only 10 s of its own time awaiting, but time inside mods API calls is free. Each station therefore runs as a child `claude -p` started with `$.process.spawn`, with the factory plugin loaded (`--plugin-dir`), the role agent (`--agent software-factory:<role>`), the role's model (`--model`), and `FACTORY_ROLE` / `FACTORY_JOB` / `FACTORY_WORKTREE` in its environment. This works identically locally, on a server and in the cloud.
+- **Routing** (4.4) is the `--model` flag at child launch, not an `agent.spawn` hook.
+- **Gates** (4.2) run inside each child session; the mod reads `FACTORY_ROLE` to know what it is guarding. In a child session the mod runs gates only (no ticker, no UI).
+- **Station procedures** live in `agents/<role>.md`; no separate skills in v1.
+- **Code layout:** the hooks module may not pass `$` to imported files, so all logic in `src/` is pure and receives plain functions (`fetch`, `run`, `spawn`) built in `hooks/register.ts`.
+- **`.factory.yml`** is parsed by a small built-in YAML-subset parser (mods can't import npm packages).
+
+## 13. Open questions (defaults chosen; change if you disagree)
 - Plugin lives in a new repo `software-factory` on lab.ironcloud.gr, mirrored to GitHub only if wanted. **Default: GitLab only.**
 - Slack notifications on by default if a webhook is provided; off otherwise.
 - `limits.parallel` default 2 per worker to keep usage predictable.
