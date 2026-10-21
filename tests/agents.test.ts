@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { childArgv, runAgent, type SpawnFn } from '../src/agents'
 import type { RepoConfig } from '../src/config'
 
-const cfg = { models: {}, allowedTools: [], protectedPaths: [] } as unknown as RepoConfig
+const cfg = { models: {}, allowedTools: [], protectedPaths: [], sandbox: { allowedDomains: [], required: false } } as unknown as RepoConfig
 const base = { prompt: 'do it', cfg, pluginRoot: '/plug', job: 'gitlab:g/p#7', worktree: '/wt' }
 
 function after(argv: string[], flag: string): string | undefined {
@@ -157,4 +157,19 @@ test('runAgent: spawn rejection is not ok', async () => {
   const r = await runAgent(spawn, { ...base, role: 'planner', onProgress: () => {} })
   expect(r.ok).toBe(false)
   expect(r.error).toContain('ENOENT')
+})
+
+test('childArgv: R24 sandbox.network.allowedDomains from .factory.yml', () => {
+  const c = { ...cfg, sandbox: { allowedDomains: ['repo.packagist.org', '*.github.com'], required: false } } as RepoConfig
+  const s = JSON.parse(after(childArgv({ ...base, cfg: c, role: 'builder' }), '--settings')!)
+  expect(s.sandbox.network).toEqual({ allowedDomains: ['repo.packagist.org', '*.github.com'] })
+  expect(s.sandbox.enabled).toBe(true)
+})
+
+test('childArgv: R24 failIfUnavailable only when sandbox.required is true', () => {
+  const off = JSON.parse(after(childArgv({ ...base, role: 'builder' }), '--settings')!)
+  expect('failIfUnavailable' in off.sandbox).toBe(false)
+  const c = { ...cfg, sandbox: { allowedDomains: [], required: true } } as RepoConfig
+  const on = JSON.parse(after(childArgv({ ...base, cfg: c, role: 'planner' }), '--settings')!)
+  expect(on.sandbox.failIfUnavailable).toBe(true)
 })

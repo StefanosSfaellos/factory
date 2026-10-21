@@ -22,6 +22,8 @@ export type RepoConfig = {
   limits: { fixLoops: number; parallel: number }
   branchPrefix: string
   allowedTools: string[]
+  /** R24: Claude Code Bash sandbox options for child agents. */
+  sandbox: { allowedDomains: string[]; required: boolean }
 }
 
 const ROLES: Role[] = [
@@ -93,6 +95,19 @@ export function parseRepoConfig(text: string): Result {
     const branchPrefix = raw.branchPrefix === undefined ? 'factory/' : raw.branchPrefix
     if (typeof branchPrefix !== 'string') throw new Error('branchPrefix must be a string')
 
+    const sandbox = { allowedDomains: [] as string[], required: false }
+    if (raw.sandbox !== undefined && raw.sandbox !== '') {
+      if (!isObj(raw.sandbox)) throw new Error('sandbox must be a map (allowedDomains, required)')
+      for (const k of Object.keys(raw.sandbox)) {
+        if (k !== 'allowedDomains' && k !== 'required') throw new Error(`unknown key "${k}" in sandbox (expected allowedDomains, required)`)
+      }
+      sandbox.allowedDomains = strList(raw.sandbox.allowedDomains, 'sandbox.allowedDomains')
+      if (sandbox.allowedDomains.some((d) => d.trim() === '' || /[\s"']/.test(d))) throw new Error('sandbox.allowedDomains entries must be non-empty host names')
+      const req = raw.sandbox.required
+      if (req !== undefined && typeof req !== 'boolean') throw new Error('sandbox.required must be true or false')
+      sandbox.required = req === true
+    }
+
     const config: RepoConfig = {
       forge: raw.forge,
       test: raw.test,
@@ -102,6 +117,7 @@ export function parseRepoConfig(text: string): Result {
       limits: { fixLoops, parallel },
       branchPrefix,
       allowedTools: strList(raw.allowedTools, 'allowedTools'),
+      sandbox,
     }
     if (raw.setup !== undefined) config.setup = raw.setup
     return { ok: true, config }

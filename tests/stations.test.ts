@@ -13,7 +13,7 @@ const SECRET = 'sekrit-token-value'
 const ref: JobRef = { forge: 'gitlab', project: 'g/p', issue: 7 }
 const cfg: RepoConfig = {
   forge: 'gitlab', test: 'npm test', reviewers: ['code', 'security'], protectedPaths: [],
-  models: {}, limits: { fixLoops: 3, parallel: 2 }, branchPrefix: 'factory/', allowedTools: [],
+  models: {}, limits: { fixLoops: 3, parallel: 2 }, branchPrefix: 'factory/', allowedTools: [], sandbox: { allowedDomains: [], required: false },
 }
 const FOOTER = '🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01TBkcSkrWnUahQ5wtspeVky'
 

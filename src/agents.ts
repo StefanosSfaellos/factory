@@ -28,13 +28,17 @@ export type ChildOpts = {
 const READ_ONLY: Role[] = ['spec-writer', 'designer', 'planner', 'code-reviewer', 'security-reviewer', 'ux-reviewer', 'approver']
 
 /**
- * R23: Claude Code's Bash sandbox for every child, in the shape the Claude Code docs
- * give (code.claude.com/docs/en/sandboxing): `sandbox.enabled`, no unsandboxed retry,
- * and the forge tokens denied to sandboxed commands. Its default write scope is the
- * working directory (the job's agent dir) and the per-user temp directory.
+ * R23/R24: Claude Code's Bash sandbox for every child, in the shape the Claude Code
+ * docs give (code.claude.com/docs/en/sandboxing): `sandbox.enabled`, no unsandboxed
+ * retry, the forge tokens denied to sandboxed commands, the repo's
+ * `sandbox.allowedDomains` as `sandbox.network.allowedDomains`, and
+ * `failIfUnavailable` only when the repo sets `sandbox.required: true` (otherwise a
+ * host without the sandbox runs children unsandboxed). Its default write scope is
+ * the working directory (the job's agent dir) and the per-user temp directory.
  */
-export const CHILD_SETTINGS = JSON.stringify({
-  sandbox: {
+export function childSettings(cfg: RepoConfig): string {
+  const sb = cfg.sandbox ?? { allowedDomains: [], required: false }
+  const sandbox: Record<string, unknown> = {
     enabled: true,
     allowUnsandboxedCommands: false,
     credentials: {
@@ -43,8 +47,11 @@ export const CHILD_SETTINGS = JSON.stringify({
         { name: 'GITLAB_TOKEN', mode: 'deny' },
       ],
     },
-  },
-})
+  }
+  if (sb.allowedDomains.length > 0) sandbox.network = { allowedDomains: [...sb.allowedDomains] }
+  if (sb.required) sandbox.failIfUnavailable = true
+  return JSON.stringify({ sandbox })
+}
 const PROGRESS_MAX = 120
 
 export function childArgv(o: ChildOpts): string[] {
@@ -62,7 +69,7 @@ export function childArgv(o: ChildOpts): string[] {
     '--agent', `software-factory:${o.role}`,
     '--model', modelFor(o.role, o.cfg),
     '--permission-mode', 'acceptEdits',
-    '--settings', CHILD_SETTINGS,
+    '--settings', childSettings(o.cfg),
     '--output-format', 'stream-json',
     '--verbose',
   ]

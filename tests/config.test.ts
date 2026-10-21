@@ -61,3 +61,44 @@ test('empty reviewers list is rejected', () => {
   expect(r.ok).toBe(false)
   if (!r.ok) expect(r.error).toContain('reviewers')
 })
+
+// ---- R24: sandbox ----
+test('sandbox defaults: no domains, not required', () => {
+  const r = parseRepoConfig('forge: github\ntest: npm test\n')
+  expect(r.ok).toBe(true)
+  if (!r.ok) return
+  expect(r.config.sandbox).toEqual({ allowedDomains: [], required: false })
+})
+test('sandbox example parses (block and inline forms)', () => {
+  const block = parseRepoConfig('forge: gitlab\ntest: composer test\nsandbox:\n  allowedDomains: ["repo.packagist.org", "*.github.com"]\n  required: true\n')
+  expect(block.ok).toBe(true)
+  if (block.ok) expect(block.config.sandbox).toEqual({ allowedDomains: ['repo.packagist.org', '*.github.com'], required: true })
+  const inline = parseRepoConfig('forge: gitlab\ntest: composer test\nsandbox: { allowedDomains: [registry.npmjs.org] }\n')
+  expect(inline.ok).toBe(true)
+  if (inline.ok) expect(inline.config.sandbox).toEqual({ allowedDomains: ['registry.npmjs.org'], required: false })
+})
+test('the template/README sandbox example parses', () => {
+  const r = parseRepoConfig(TEMPLATE_WITH_SANDBOX)
+  expect(r.ok).toBe(true)
+  if (r.ok) expect(r.config.sandbox.allowedDomains).toEqual(['repo.packagist.org', '*.github.com'])
+})
+test('sandbox validation: non-string domain, non-boolean required, non-map', () => {
+  const bad = (y: string) => parseRepoConfig(`forge: github\ntest: npm test\n${y}`)
+  const d = bad('sandbox: { allowedDomains: [ok.example, 3] }\n')
+  expect(d.ok).toBe(false)
+  if (!d.ok) expect(d.error).toContain('sandbox.allowedDomains')
+  const q = bad('sandbox: { required: yes }\n')
+  expect(q.ok).toBe(false)
+  if (!q.ok) expect(q.error).toContain('sandbox.required')
+  expect(bad('sandbox: [a]\n').ok).toBe(false)
+  const u = bad('sandbox: { allowedDomain: [x] }\n')
+  expect(u.ok).toBe(false)
+  if (!u.ok) expect(u.error).toContain('allowedDomain')
+})
+
+const TEMPLATE_WITH_SANDBOX = `forge: gitlab
+test: "composer test"
+sandbox:
+  allowedDomains: ["repo.packagist.org", "*.github.com"]
+  required: false
+`
