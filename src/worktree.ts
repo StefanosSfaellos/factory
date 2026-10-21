@@ -4,13 +4,23 @@ import { redact } from './redact'
 export type RunFn = (
   argv: string[],
   opts: { cwd?: string; timeoutMs?: number },
-) => Promise<{ exitCode: number; stdout: string; stderr: string; timedOut?: boolean }>
+) => Promise<{ exitCode: number; stdout: string; stderr: string; timedOut?: boolean; truncated?: boolean }>
+
+/** Timeout for network git (clone, fetch, push, ls-remote); `$.process.run` defaults to 30 s. */
+export const NET_TIMEOUT_MS = 600000
+
+/**
+ * R18: every command the mod runs that executes repository-controlled code (the
+ * repo's setup/test commands, git in a checkout) starts without the forge
+ * credentials. Token-bearing git passes the token in the URL argument instead.
+ */
+export const NO_TOKENS = ['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN']
 
 // Every git command the mod runs ignores planted hooks (a pre-push hook would see
 // the token URL) and fsmonitor, and reads no global or system config (R21): only
 // the repository's own config, which for token work is a fresh bare repo the mod
 // just created.
-export const GIT_ENV = ['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1']
+export const GIT_ENV = [...NO_TOKENS, 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1']
 export const GIT_SAFE = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false']
 
 /** Hardened git argv for a command run in `dir`. */
@@ -47,8 +57,8 @@ export async function ensureCheckout(
 ): Promise<void> {
   const { dir, cloneUrl, publicUrl, branch, base } = opts
   const secrets = [...(opts.secrets ?? []), cloneUrl]
-  const git = async (argv: string[]): Promise<{ exitCode: number }> => {
-    const r = await run(argv, {})
+  const git = async (argv: string[], net = false): Promise<{ exitCode: number }> => {
+    const r = await run(argv, net ? { timeoutMs: NET_TIMEOUT_MS } : {})
     if (r.exitCode !== 0) {
       const detail = `${r.stderr}\n${r.stdout}`.trim()
       const c = argv.indexOf('-C')
@@ -58,10 +68,10 @@ export async function ensureCheckout(
     return r
   }
   const exists = (await run(['test', '-d', dir], {})).exitCode === 0
-  if (!exists) await git(gitNoDir('clone', cloneUrl, dir))
+  if (!exists) await git(gitNoDir('clone', cloneUrl, dir), true)
   // Never leave the token in the checkout: agents and test commands run here.
   await git(gitArgv(dir, 'remote', 'set-url', 'origin', publicUrl))
-  await git(gitArgv(dir, 'fetch', cloneUrl, '+refs/heads/*:refs/remotes/origin/*'))
+  await git(gitArgv(dir, 'fetch', cloneUrl, '+refs/heads/*:refs/remotes/origin/*'), true)
   const remote = await run(gitArgv(dir, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`), {})
   const from = remote.exitCode === 0 ? branch : base
   await git(gitArgv(dir, 'checkout', '-B', branch, `origin/${from}`))

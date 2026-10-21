@@ -31,6 +31,7 @@ const ROLES: Role[] = [
   'code-reviewer', 'security-reviewer', 'ux-reviewer', 'approver',
 ]
 const REVIEWERS: Reviewer[] = ['code', 'security', 'ux']
+const KEYS = ['forge', 'test', 'setup', 'reviewers', 'protectedPaths', 'models', 'limits', 'branchPrefix', 'allowedTools', 'sandbox']
 
 export const DEFAULT_MODELS: Record<Role, string> = {
   'spec-writer': 'opus',
@@ -65,6 +66,10 @@ export function parseRepoConfig(text: string): Result {
   try {
     const raw = parseYaml(text)
     if (!isObj(raw)) throw new Error('config must be a map')
+    // A typo (`protectedPath:`) must not silently drop a control.
+    for (const k of Object.keys(raw)) {
+      if (!KEYS.includes(k)) throw new Error(`unknown key "${k}" in .factory.yml (expected one of ${KEYS.join(', ')})`)
+    }
     if (raw.forge === undefined) throw new Error('missing required key: forge (github | gitlab)')
     if (raw.forge !== 'github' && raw.forge !== 'gitlab') throw new Error(`forge must be github or gitlab, got ${String(raw.forge)}`)
     if (raw.test === undefined || typeof raw.test !== 'string' || raw.test.trim() === '') throw new Error('missing required key: test (command the verify station runs)')

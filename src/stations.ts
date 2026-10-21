@@ -7,7 +7,7 @@ import { redact } from './redact'
 import type { Comment, Job, JobRef, Station, Verdict } from './types'
 import { verify } from './verify'
 import { runAgent, type SpawnFn } from './agents'
-import { branchName, ensureCheckout, gitArgv, gitNoDir, workDir, type RunFn } from './worktree'
+import { branchName, ensureCheckout, gitArgv, gitNoDir, NET_TIMEOUT_MS, workDir, type RunFn } from './worktree'
 
 // Station runner: `advance` performs one station step for one job.
 // State-write order: every comment is posted first, the label changes last.
@@ -61,6 +61,11 @@ const afterFirstLine = (s: string) => {
   return nl < 0 ? '' : t.slice(nl + 1).trim()
 }
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
+const NET = { timeoutMs: NET_TIMEOUT_MS }
+/** Appended to `.factory/branch.diff` / `branch.log` when `$.process.run` cut the output. */
+export const TRUNCATED_NOTE = '[factory: diff truncated at 4 MiB — review incomplete]'
+const withCut = (r: { stdout: string; truncated?: boolean }) =>
+  r.truncated ? `${r.stdout}${r.stdout === '' || r.stdout.endsWith('\n') ? '' : '\n'}${TRUNCATED_NOTE}\n` : r.stdout
 
 /** Drops marker comments not written by the factory itself (forged state). */
 function trustedView(job: Job, me: string): Job {
@@ -218,7 +223,7 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
   }
   /** Fetches the job branch (as refs/factory/build) and the base from the forge into `bare`. */
   const fetchForge = async (bare: string, baseBranch: string) => {
-    await runOk(gitArgv(bare, 'fetch', '--no-tags', cloneUrl, `+refs/heads/${branch}:refs/factory/build`, `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`), 'git fetch')
+    await runOk(gitArgv(bare, 'fetch', '--no-tags', cloneUrl, `+refs/heads/${branch}:refs/factory/build`, `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`), 'git fetch', NET)
   }
   const buildSha = async (bare: string) => shaOf((await runOk(gitArgv(bare, 'rev-parse', '--verify', 'refs/factory/build^{commit}'), 'git rev-parse')).stdout)
   /** R22: the factory owns `.factory/`; a branch that tracks it is refused. */
@@ -241,7 +246,7 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
    * Fresh agent dir plus the branch head, diff and log computed in a fresh bare repo
    * from the forge, written to `<dir>/.factory/` for the read-only reviewers and approver (R19).
    */
-  const prepareReview = async (): Promise<{ baseBranch: string; sha: string | undefined }> => {
+  const prepareReview = async (): Promise<{ baseBranch: string; sha: string | undefined; truncated: boolean }> => {
     const baseBranch = await checkout()
     const ev = await withBare(async (bare) => {
       await fetchForge(bare, baseBranch)
@@ -250,16 +255,16 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
       if (!sha) return { sha }
       const diff = await runOk(gitArgv(bare, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', `refs/remotes/origin/${baseBranch}...${sha}`), 'git diff')
       const log = await runOk(gitArgv(bare, 'log', '--no-color', '--no-decorate', `refs/remotes/origin/${baseBranch}..${sha}`), 'git log')
-      return { sha, diff: diff.stdout, log: log.stdout }
+      return { sha, diff: withCut(diff), log: withCut(log), truncated: diff.truncated === true || log.truncated === true }
     })
     await freshFactoryDir()
     if (ev.sha) {
       await deps.writeFile(`${dir}/.factory/branch.diff`, ev.diff ?? '')
       await deps.writeFile(`${dir}/.factory/branch.log`, ev.log ?? '')
     }
-    return { baseBranch, sha: ev.sha }
+    return { baseBranch, sha: ev.sha, truncated: ev.truncated === true }
   }
-  const remoteSha = async () => shaOf((await deps.run(gitNoDir('ls-remote', cloneUrl, `refs/heads/${branch}`), {})).stdout)
+  const remoteSha = async () => shaOf((await deps.run(gitNoDir('ls-remote', cloneUrl, `refs/heads/${branch}`), NET)).stdout)
   const agent = async (role: Role, artifacts: Record<string, string>): Promise<string> => {
     const r = await runAgent(deps.spawn, {
       role, prompt: promptFor(from, role, job, artifacts), cfg, pluginRoot: deps.pluginRoot, job: jobId, worktree: dir, forgeHosts: deps.forgeHosts,
@@ -268,8 +273,8 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
     if (!r.ok) throw new Error(r.error ?? `${role} agent failed`)
     return r.output.trim()
   }
-  const runOk = async (argv: string[], what: string) => {
-    const r = await deps.run(argv, {})
+  const runOk = async (argv: string[], what: string, opts: { timeoutMs?: number } = {}) => {
+    const r = await deps.run(argv, opts)
     if (r.exitCode !== 0) throw new Error(clean(`${what} failed (exit ${r.exitCode}): ${`${r.stderr}\n${r.stdout}`.trim()}`))
     return r
   }
@@ -311,7 +316,7 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
         // builder controls its own .git, so nothing token-bearing runs there.
         const lastFail = newest([...markersOf(job, 'test-report').filter((x) => x.attrs.passed === 'false'), ...markersOf(job, 'verdict').filter((x) => x.attrs.pass === 'false')])
         await withBare(async (bare) => {
-          await runOk(gitArgv(bare, 'fetch', '--no-tags', dir, '+HEAD:refs/factory/build'), 'git fetch from the builder directory')
+          await runOk(gitArgv(bare, 'fetch', '--no-tags', dir, '+HEAD:refs/factory/build'), 'git fetch from the builder directory', NET)
           await refuseTrackedFactory(bare)
           let sha = await buildSha(bare)
           if (!sha) throw new Error('could not read the built commit')
@@ -329,7 +334,7 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
             if (!sha) throw new Error('git commit-tree printed no commit')
             await runOk(gitArgv(bare, 'update-ref', 'refs/factory/build', sha), 'git update-ref')
           }
-          await runOk(gitArgv(bare, 'push', cloneUrl, `refs/factory/build:refs/heads/${branch}`), 'git push')
+          await runOk(gitArgv(bare, 'push', cloneUrl, `refs/factory/build:refs/heads/${branch}`), 'git push', NET)
         })
         return { posts: [], event: { kind: 'build-done' } }
       }
@@ -338,9 +343,10 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
         return { posts: [r.report], event: { kind: 'verify', passed: r.passed } }
       }
       case 'review': {
-        const { baseBranch, sha } = await prepareReview()
+        const { baseBranch, sha, truncated } = await prepareReview()
         if (!sha) throw new Error('could not read the branch head')
-        const a = { ...base, report: art('test-report') ?? '', base: baseBranch }
+        const a: Record<string, string> = { ...base, report: art('test-report') ?? '', base: baseBranch }
+        if (truncated) a.truncated = 'true'
         const settled = await Promise.allSettled(ctx.requiredReviewers.map(async (role): Promise<Verdict> => {
           const out = await agent(role, a)
           const m = /^VERDICT:\s*(pass|fail)$/i.exec(firstLine(out))
@@ -359,7 +365,7 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
       case 'approve': {
         const verdicts = formatVerdicts(gateVerdicts)
         const report = art('test-report') ?? ''
-        const out = await agent('approver', { spec: base.spec, report, verdicts })
+        const out = await agent('approver', { spec: base.spec, report, verdicts, ...(gateTruncated ? { truncated: 'true' } : {}) })
         const head = firstLine(out)
         const rej = /^REJECT:\s*(.*)$/.exec(head)
         if (rej) {
@@ -405,15 +411,17 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
   }
   let gateVerdicts: Verdict[] = []
   let gateSha: string | undefined
+  let gateTruncated = false
   if (from === 'approve') {
     const rej = report && verdictsAfter(job, report, ['approver']).byRole.get('approver')
     if (rej && rej.attrs.pass === 'false' && replayable(rej.c)) {
       const v = toVerdict(rej)
       return settle({ posts: [], event: { kind: 'verdicts', verdicts: [v] }, failed: [v], round: Number(rej.attrs.round) })
     }
-    const prep = await attempt(async () => (await prepareReview()).sha)
+    const prep = await attempt(prepareReview)
     if (!prep.ok) return prep.blocked
-    gateSha = prep.value
+    gateSha = prep.value.sha
+    gateTruncated = prep.value.truncated
     const gate = approveGate(job, ctx.requiredReviewers, ctx.fixLoops, gateSha)
     if (!gate.ok) return block(from, `Refusing to run the approver: ${gate.why}. Relabel to \`factory::build\` or \`factory::verify\` to produce fresh evidence.`)
     gateVerdicts = gate.verdicts

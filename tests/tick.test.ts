@@ -259,11 +259,11 @@ test('a host command that may outlast the lease renews before it starts', async 
   deps.run = async (argv, o) => {
     const renewedBefore = w.edits.length > 0
     seen.push({ argv: argv.join(' '), renewedBefore })
-    if (argv[0] === 'sh') w.clock.now += 9 * MIN
+    if (argv.includes('sh') && argv[argv.indexOf('sh') + 1] === '-c') w.clock.now += 9 * MIN
     return run(argv, o)
   }
   await tick({ ...deps, projects, parallel: 2 })
-  const test = seen.find((x) => x.argv.startsWith('sh '))!
+  const test = seen.find((x) => x.argv.includes(' sh -c '))!
   expect(test.renewedBefore).toBe(true)
   expect(w.edits[0].body).toContain('factory:lease worker=w1')
   expect(w.edits[0].body).not.toBe(leaseBody('w1', w.clock.now, 0))
@@ -296,8 +296,9 @@ test('agent output renews the lease at most once per 5 minutes', async () => {
   await tick({ ...deps, projects, parallel: 2 })
   const leaseId = w.jobs.get(23)!.comments.find((c) => c.body.includes('factory:lease'))!.id
   const during = w.edits.filter((e) => e.id === leaseId).map((e) => e.body)
-  // The renewal before the spec step, then from 12 one-minute lines (non-text lines too) at +5 and +10, then the release.
-  expect(during).toEqual([leaseBody('w1', T0), leaseBody('w1', T0 + 5 * MIN), leaseBody('w1', T0 + 10 * MIN), leaseBody('w1', T0 + 12 * MIN, 0)])
+  // The renewal before the spec step, one before the clone (a network git call may run 10 min),
+  // then from 12 one-minute lines (non-text lines too) at +5 and +10, then the release.
+  expect(during).toEqual([leaseBody('w1', T0), leaseBody('w1', T0), leaseBody('w1', T0 + 5 * MIN), leaseBody('w1', T0 + 10 * MIN), leaseBody('w1', T0 + 12 * MIN, 0)])
 })
 
 test('the newest own expired lease is reused instead of posting another', async () => {

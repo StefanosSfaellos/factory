@@ -6,11 +6,14 @@ protectedPaths: ["db/migrations/**", ".gitlab-ci.yml"]
 models: { builder: sonnet }       # optional overrides
 limits: { fixLoops: 3, parallel: 2 }
 branchPrefix: factory/
-# Optional: Claude Code's Bash sandbox for the agents (always on).
+# Optional: Claude Code's Bash sandbox for the agents (enabled wherever the host supports it).
+# The builder is always allowed Bash; the factory's gates filter every command and
+# the sandbox, when available, contains them. Read-only roles get no shell.
 # allowedDomains: hosts the agents' shell commands may reach (package registries...);
 #   none by default, so installs that need the network fail until listed here.
 # required: true makes an agent fail at start on a host where the sandbox cannot
-#   run (e.g. Linux without bubblewrap); false (default) lets it run unsandboxed.
+#   run (e.g. Linux without bubblewrap); false (default) lets the builder's Bash run
+#   there without the sandbox's containment, still filtered by the gates.
 # sandbox:
 #   allowedDomains: ["repo.packagist.org", "*.github.com"]
 #   required: false

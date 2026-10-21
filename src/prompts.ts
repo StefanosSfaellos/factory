@@ -32,6 +32,9 @@ const TASK: Partial<Record<Station, string>> = {
   approve: 'Decide whether this branch may become a merge request, following your output format exactly. The branch diff and log are in .factory/branch.diff and .factory/branch.log.',
 }
 
+const TRUNCATED_WARNING =
+  'Warning: the branch diff or log was truncated at 4 MiB, so you cannot see the whole change (the file ends with a "[factory: diff truncated at 4 MiB — review incomplete]" line). Say so in your findings; do not pass changes you could not read.'
+
 export function promptFor(station: Station, role: Role, job: Job, artifacts: Record<string, string>): string {
   const a = artifacts
   const parts = [
@@ -59,10 +62,14 @@ export function promptFor(station: Station, role: Role, job: Job, artifacts: Rec
     case 'review': {
       const base = safeRef(a.base)
       parts.splice(3, 0, `The base branch is ${base}. The branch diff against origin/${base} is in .factory/branch.diff and its commit log in .factory/branch.log in the current directory; read them (you have no shell).`)
+      if (a.truncated === 'true') {
+        parts.splice(4, 0, TRUNCATED_WARNING)
+      }
       parts.push(block('APPROVED SPEC', a.spec), block('DESIGN NOTE', a.design), block('PLAN', a.plan), block('TEST REPORT', a.report))
       break
     }
     case 'approve':
+      if (a.truncated === 'true') parts.splice(3, 0, TRUNCATED_WARNING)
       parts.push(block('APPROVED SPEC', a.spec), block('TEST REPORT', a.report), block('VERDICTS', a.verdicts))
       break
     default:
@@ -71,8 +78,8 @@ export function promptFor(station: Station, role: Role, job: Job, artifacts: Rec
   return parts.join('\n\n')
 }
 
-export const MR_FOOTER =
-  '🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01TBkcSkrWnUahQ5wtspeVky'
+// R26: a neutral line; factory-opened MRs never carry a development session URL.
+export const MR_FOOTER = '🤖 Built by software-factory with [Claude Code](https://claude.com/claude-code)'
 
 const EXCERPT_MAX = 6000
 

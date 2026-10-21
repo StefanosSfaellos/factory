@@ -83,7 +83,7 @@ async function startParent($: any, on: any, env: Record<string, string>, surface
 
 test('/factory opens the pane; Approve posts /approve and re-ticks; Svg only on desktop', { options: { repos: 'gitlab:g/p', workerId: 'w1' } }, async ($, on) => {
   const g = gitlab(on, [{ iid: 42, title: 'Round VAT', station: 'awaiting-spec', notes: [SPEC_NOTE] }])
-  const { opened, toasts } = await startParent($, on, { GITLAB_TOKEN: 'glpat-abcdefghijklmnop', HOME: '/home/u' })
+  const { opened, toasts, clock } = await startParent($, on, { GITLAB_TOKEN: 'glpat-abcdefghijklmnop', HOME: '/home/u' })
   const r = await $.command.run({ command: 'factory', args: '' })
   expect(r.text).toBeUndefined()
   expect(opened).toEqual(['factory'])
@@ -100,7 +100,12 @@ test('/factory opens the pane; Approve posts /approve and re-ticks; Svg only on 
 
   await ui.press({ key: 'approve-42' })
   expect(g.posts.some((p) => p.body.includes('/approve'))).toBe(true)
-  // Re-ticked at once: the approval moves it to design, which blocks on the missing .factory.yml.
+  // The press returns before the re-tick: the label has not moved yet, but the buttons are gone.
+  expect(g.store.get(42)!.labels).toEqual(['factory::awaiting-spec'])
+  expect(await ui.find({ key: 'approve-42' })).toBeUndefined()
+  // Re-ticked on the next clock turn: the approval moves it to design, which blocks on the missing .factory.yml.
+  await clock.advance(0)
+  for (let i = 0; i < 50 && !toasts.includes('factory #42 blocked at design'); i++) await clock.settle()
   expect(g.store.get(42)!.labels).toEqual(['factory::blocked'])
   expect(toasts).toContain('factory #42 blocked at design')
   // The views were refreshed from the forge after the tick.
@@ -216,9 +221,13 @@ test('Approve while a tick holds the lock: posted, no deadlock, the buttons go',
   expect(hold.waiting).toBe(1)
   await ui.press({ key: 'approve-42' })
   expect(g.posts.map((p) => p.body).filter((b) => !b.startsWith('<!--'))).toEqual(['/approve'])
-  // No re-tick ran (the lock was held), yet the job no longer asks for a decision.
+  // The job no longer asks for a decision as soon as the press returns.
   expect(await ui.find({ key: 'approve-42' })).toBeUndefined()
+  // The scheduled re-tick finds the lock held: no re-tick runs, and the pane says so.
+  await clock.advance(0)
+  for (let i = 0; i < 50 && !(await ui.find({ type: 'Text', text: /a tick is already running/ })); i++) await clock.settle()
   expect(await ui.find({ type: 'Text', text: /a tick is already running/ })).toBeDefined()
+  expect(g.store.get(42)!.labels).toEqual(['factory::awaiting-spec'])
   hold.armed = false
   release()
   expect((await tick).text).toContain('factory tick:')
@@ -290,4 +299,27 @@ test('a child session draws nothing of its own', { options: { repos: 'gitlab:g/p
     expect(await ui.find({ type: 'Text', text: /Factory/ })).toBeUndefined()
     await ui.unmount()
   }
+})
+
+test('final M9: an Approve press returns without running the tick; the re-tick is scheduled on the clock', { options: { repos: 'gitlab:g/p', workerId: 'w1' } }, async ($, on) => {
+  const g = gitlab(on, [{ iid: 42, title: 'Round VAT', station: 'awaiting-spec', notes: [SPEC_NOTE] }], 'forge: gitlab\ntest: "npm test"\n')
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  let spawned = 0
+  on('process.spawn', async function* () {
+    spawned++
+    yield { stream: 'stdout' as const, text: '{"type":"result","subtype":"success","result":"N/A"}\n' }
+    return { value: { code: 0, signal: null } }
+  } as any)
+  const { clock } = await startParent($, on, { GITLAB_TOKEN: 'glpat-abcdefghijklmnop', HOME: '/home/u' })
+  await $.command.run({ command: 'factory', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'approve-42' })
+  // Posted inside the press; no agent started and no relabel yet.
+  expect(g.posts.map((p) => p.body).filter((b) => !b.startsWith('<!--'))).toEqual(['/approve'])
+  expect(spawned).toBe(0)
+  expect(g.store.get(42)!.labels).toEqual(['factory::awaiting-spec'])
+  await clock.advance(0)
+  for (let i = 0; i < 50 && spawned === 0; i++) await clock.settle()
+  expect(spawned).toBeGreaterThan(0)
+  await ui.unmount()
 })

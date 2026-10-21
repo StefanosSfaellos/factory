@@ -27,7 +27,8 @@ type Out = { station: Station; fixLoops: number; reason?: string }
 
 function failLoop(ctx: Ctx, why: string): Out {
   const loops = ctx.fixLoops + 1
-  if (loops >= ctx.maxFixLoops) {
+  // R27: maxFixLoops is the number of loops back to build; the next failure blocks.
+  if (loops > ctx.maxFixLoops) {
     return { station: 'blocked', fixLoops: loops, reason: `fix loop limit reached (${loops}/${ctx.maxFixLoops}): ${why}` }
   }
   return { station: 'build', fixLoops: loops, reason: why }

@@ -2,7 +2,7 @@
 
 A Claude Code mod plugin that runs a multi-agent pipeline over GitHub and GitLab issues: spec (approved by a human), design, plan, test-first build, independent verify, code/security/UX review, approval, and a merge/pull request the factory opens itself.
 
-Tested with Claude Code 2.1.306.
+Unit-tested against Claude Code 2.1.306; run scripts/smoke.md on your worker before relying on it.
 
 ## Install
 
@@ -117,10 +117,10 @@ Read from the default branch. Required: `forge`, `test`.
 | `reviewers` | `[code, security]` | Any of `code`, `security`, `ux`; at least one entry |
 | `protectedPaths` | `[]` | Globs the builder may not change |
 | `models` | see below | Per-role model overrides |
-| `limits.fixLoops` | 3 | Review/verify rounds before the job is blocked |
+| `limits.fixLoops` | 3 | How many times a failed verify/review may loop back to build; the next failure blocks the job (with 3, the 4th failure blocks) |
 | `limits.parallel` | 2 | Currently ignored; use the `parallel` plugin option |
 | `branchPrefix` | `factory/` | Branch is `<prefix><issue>-<slug>` |
-| `allowedTools` | `[]` | Extra tools for the builder |
+| `allowedTools` | `[]` | Extra tools for the builder (it always gets `Bash`) |
 | `sandbox` | see below | Bash sandbox for the agents |
 
 Default models: spec-writer `opus`, designer `opus`, planner `sonnet`, builder `sonnet`, code-reviewer `opus`, security-reviewer `opus`, ux-reviewer `sonnet`, approver `sonnet`. The factory owns a `.factory/` directory in each job's checkout; a branch that tracks `.factory/` is refused (job goes to `factory::blocked`).
@@ -130,14 +130,16 @@ See `templates/.factory.yml` for an example. The `sandbox` map controls the Bash
 ```yaml
 sandbox:
   allowedDomains: ["repo.packagist.org", "*.github.com"]   # hosts agents' shell commands may reach; default none
-  required: false   # true: agents fail to start where the sandbox can't run; false (default): they run unsandboxed there
+  required: false   # true: agents fail to start where the sandbox can't run; false (default): see below
 ```
 
-With no `allowedDomains`, sandboxed commands have no network, so a build that installs packages needs its registries listed. With `required: false`, a host without the sandbox (for example Linux without bubblewrap) runs agents' commands unsandboxed; set `required: true` to refuse that.
+With no `allowedDomains`, sandboxed commands have no network, so a build that installs packages needs its registries listed.
+
+The builder is always allowed `Bash` (plus the repo's `allowedTools`), because a `claude -p` child in `acceptEdits` mode would otherwise be refused Bash and could not run tests or commit. Every builder command is filtered by the factory's `tool.call` gates; where Claude Code's Bash sandbox is available it also contains them. Read-only roles get no shell at all. With `required: false` (default), a host without the sandbox (for example Linux without bubblewrap) runs the builder's commands without that containment, still filtered by the gates; set `required: true` to make agents fail closed there instead.
 
 ## Deployment and security
 
-Each station runs as a child `claude -p` session with this plugin loaded. Inside it, the plugin's `tool.call` gates refuse pushes, merge/pull-request creation, edits outside the job's directory, reads outside it or under `/proc`, and any shell or edit for the read-only roles. Children start without `GITHUB_TOKEN`/`GITLAB_TOKEN`/`GITLAB_URL` and with Claude Code's Bash sandbox enabled; the factory does every token-bearing git operation itself in a fresh, throw-away bare repository.
+Each station runs as a child `claude -p` session with this plugin loaded. Inside it, the plugin's `tool.call` gates refuse pushes, merge/pull-request creation, edits outside the job's directory, reads outside it or under `/proc`, and any shell or edit for the read-only roles. Children, and the repository's `setup`/`test` commands the verify station runs, start without `GITHUB_TOKEN`/`GITLAB_TOKEN`/`GITLAB_URL`/`FACTORY_GITLAB_TOKEN`; children also get Claude Code's Bash sandbox where the host supports it; the factory does every token-bearing git operation itself in a fresh, throw-away bare repository.
 
 Mods run with your permissions, and the child sessions run with `--permission-mode acceptEdits`. Protect the default branch on the forge too (branch protection, required reviews): the factory only pushes its own branch and opens a merge/pull request, but the forge is the real backstop.
 

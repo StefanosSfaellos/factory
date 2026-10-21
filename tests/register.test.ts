@@ -382,3 +382,37 @@ test('a rejecting Slack fetch does not fail the tick', { options: { repos: 'gitl
   expect(logs.join('\n')).toContain('post failed')
   expect(logs.join('\n')).not.toContain('SECRETXYZ')
 })
+
+test('final M7: RunFn surfaces isStdoutTruncated; a truncated branch.diff is marked and reviewers are told', { options: { repos: 'gitlab:g/p', workerId: 'w1' } }, async ($, on) => {
+  mock.env(on, { GITLAB_TOKEN: 'glpat-abcdefghijklmnop', HOME: '/home/u' })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  const g = gitlab(on, 'review')
+  g.issue.notes.push({ id: 900, body: '<!-- factory:test-report passed=true sha=aaaaaaa -->\nok', created_at: '2026-10-21T11:00:00Z', author: { username: 'bot' } })
+  const written: Record<string, string> = {}
+  on('fs.write', (_, e) => { written[e.path] = e.text; return { value: undefined } })
+  on('process.run', (_, e) => {
+    const a = e.argv
+    const out = (stdout: string, cut = false) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: cut, isStderrTruncated: false } })
+    if (a.includes('rev-parse') && a.at(-1) === 'refs/factory/build^{commit}') return out('aaaaaaa\n')
+    if (a.includes('diff')) return out('diff --git a/x b/x\n', true)
+    if (a.includes('log')) return out('commit aaaaaaa\n')
+    return out('')
+  })
+  const prompts: string[] = []
+  on('process.spawn', async function* (_: unknown, e: { argv: readonly string[] }) {
+    prompts.push(e.argv[e.argv.indexOf('-p') + 1])
+    yield { stream: 'stdout' as const, text: '{"type":"result","subtype":"success","result":"VERDICT: pass\\n- none"}\n' }
+    return { value: { code: 0, signal: null } }
+  } as any)
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  await $.command.run({ command: 'factory', args: 'run #4' })
+  const NOTE = '[factory: diff truncated at 4 MiB — review incomplete]'
+  const diff = Object.entries(written).find(([p]) => p.endsWith('/.factory/branch.diff'))
+  expect(diff).toBeDefined()
+  expect(diff![1].trimEnd().endsWith(NOTE)).toBe(true)
+  const log = Object.entries(written).find(([p]) => p.endsWith('/.factory/branch.log'))!
+  expect(log[1]).not.toContain(NOTE)
+  expect(prompts.length).toBeGreaterThan(0)
+  for (const p of prompts) expect(p).toContain('truncated at 4 MiB')
+})

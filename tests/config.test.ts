@@ -102,3 +102,16 @@ sandbox:
   allowedDomains: ["repo.packagist.org", "*.github.com"]
   required: false
 `
+
+test('final I6: an unknown top-level key is rejected, naming the key (a typo never drops a control)', () => {
+  const r = parseRepoConfig('forge: gitlab\ntest: npm test\nprotectedPath: ["db/**"]\n')
+  expect(r.ok).toBe(false)
+  if (r.ok) return
+  expect(r.error).toContain('protectedPath')
+  expect(r.error).toContain('unknown key')
+})
+
+test('final I6: every documented top-level key is accepted', () => {
+  const r = parseRepoConfig(`${SPEC}allowedTools: ["Bash(composer *)"]\nsandbox:\n  allowedDomains: ["repo.packagist.org"]\n  required: false\n`)
+  expect(r.ok).toBe(true)
+})

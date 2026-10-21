@@ -9,13 +9,15 @@ import type { RunFn } from '../src/worktree'
 import type { SpawnFn } from '../src/agents'
 
 const ME = 'factory-bot'
+/** A repo-controlled shell run (`env -u ... sh -c <cmd>`). */
+const isSh = (argv: string[]) => { const i = argv.indexOf('sh'); return i >= 0 && argv[i + 1] === '-c' }
 const SECRET = 'sekrit-token-value'
 const ref: JobRef = { forge: 'gitlab', project: 'g/p', issue: 7 }
 const cfg: RepoConfig = {
   forge: 'gitlab', test: 'npm test', reviewers: ['code', 'security'], protectedPaths: [],
   models: {}, limits: { fixLoops: 3, parallel: 2 }, branchPrefix: 'factory/', allowedTools: [], sandbox: { allowedDomains: [], required: false },
 }
-const FOOTER = '🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01TBkcSkrWnUahQ5wtspeVky'
+const FOOTER = '🤖 Built by software-factory with [Claude Code](https://claude.com/claude-code)'
 
 const c = (id: string, body: string, min: number, author = ME, trusted?: boolean): Comment => {
   const x: Comment = { id, body, createdAt: new Date(Date.UTC(2026, 9, 21, 9, min)).toISOString(), author }
@@ -37,6 +39,8 @@ function setup(station: string, comments: Comment[] = [], opts: {
   commentFailures?: number
   trackedFactory?: string
   mkdirFail?: boolean
+  cloneFail?: boolean
+  diffTruncated?: boolean
 } = {}) {
   const state: Job & { head: string } = {
     head: opts.head ?? 'aaaaaaa',
@@ -104,7 +108,9 @@ function setup(station: string, comments: Comment[] = [], opts: {
     // the agent dir was just removed, so ensureCheckout always clones afresh
     if (argv[0] === 'test' && argv[1] === '-d') return { exitCode: 1, stdout: '', stderr: '' }
     if (argv.includes('commit-tree')) { state.head = 'ccccccc'; return { exitCode: 0, stdout: 'ccccccc\n', stderr: '' } }
-    if (argv[0] === 'sh') return { exitCode: opts.verifyExit ?? 0, stdout: `ran tests with ${SECRET}\n12 passed`, stderr: '' }
+    if (argv.includes('clone') && opts.cloneFail) return { exitCode: 128, stdout: '', stderr: `fatal: could not read from https://oauth2:${SECRET}@host` }
+    if (isSh(argv)) return { exitCode: opts.verifyExit ?? 0, stdout: `ran tests with ${SECRET}\n12 passed`, stderr: '' }
+    if (opts.diffTruncated && (argv.includes('diff') || argv.includes('log'))) return { exitCode: 0, stdout: `${argv.includes('diff') ? 'diff --git a/x b/x' : 'commit aaaaaaa'}\n`, stderr: '', truncated: true }
     if (argv.includes('push') && opts.pushStderr) return { exitCode: 128, stdout: '', stderr: opts.pushStderr }
     if ((argv.includes('ls-tree') || argv.includes('ls-files')) && opts.trackedFactory) return { exitCode: 0, stdout: `${opts.trackedFactory}\n`, stderr: '' }
     if (argv.includes('rev-parse') && argv.at(-1)!.endsWith('^{tree}')) return { exitCode: 0, stdout: 'eeeeeee\n', stderr: '' }
@@ -208,7 +214,7 @@ test('build writes spec file, excludes .factory/, requires BUILD-DONE and pushes
   const push = s.runs.find((a) => a.includes('push'))!
   expect(push.slice(-2)).toEqual([`https://oauth2:${SECRET}@host/g/p.git`, 'refs/factory/build:refs/heads/factory/7-add-vat-rounding'])
   expect(push[push.indexOf('-C') + 1]).toMatch(/^\/work\/gitlab\/g__p\/7\.bare-[0-9a-f]{12}$/)
-  expect(s.runs).toContainEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/work/gitlab/g__p/7', 'remote', 'set-url', 'origin', 'https://host/g/p.git'])
+  expect(s.runs).toContainEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/work/gitlab/g__p/7', 'remote', 'set-url', 'origin', 'https://host/g/p.git'])
   expect(s.log).toEqual(['label:verify'])
 })
 
@@ -259,14 +265,22 @@ test('review: all pass -> approve', async () => {
   expect((await advance(ref, s.deps)).to).toBe('approve')
 })
 
-test('review: fix loop limit reached -> blocked', async () => {
-  const prior = [0, 1].map((i) => c(`v${i}`, `<!-- factory:verdict role=code-reviewer pass=false round=${i} -->\n- bad`, 10 + i))
+test('review: fix loop limit reached -> blocked (R27: the 4th failure with fixLoops 3)', async () => {
+  const prior = [0, 1, 2].map((i) => c(`v${i}`, `<!-- factory:verdict role=code-reviewer pass=false round=${i} -->\n- bad`, 10 + i))
   const s = setup('review', [...dossier(), ...prior, c('t', REPORT_OK, 20)], {
     agents: { 'code-reviewer': 'VERDICT: fail\n- still bad', 'security-reviewer': 'VERDICT: pass' },
   })
   const r = await advance(ref, s.deps)
   expect(r.to).toBe('blocked')
   expect(s.log.some((l) => l.startsWith('comment:<!-- factory:blocked'))).toBe(true)
+})
+
+test('R27: the 3rd review failure with fixLoops 3 still goes back to build', async () => {
+  const prior = [0, 1].map((i) => c(`v${i}`, `<!-- factory:verdict role=code-reviewer pass=false round=${i} -->\n- bad`, 10 + i))
+  const s = setup('review', [...dossier(), ...prior, c('t', REPORT_OK, 20)], {
+    agents: { 'code-reviewer': 'VERDICT: fail\n- still bad', 'security-reviewer': 'VERDICT: pass' },
+  })
+  expect((await advance(ref, s.deps)).to).toBe('build')
 })
 
 const approveComments = () => [
@@ -288,6 +302,8 @@ test('approve: APPROVE opens MR with dossier and footer, posts approval, labels 
   expect(mr.body).toContain('1. Task one')
   expect(mr.body).toContain('code-reviewer')
   expect(mr.body.endsWith(FOOTER)).toBe(true)
+  // R26: no development-session URL in a factory-opened MR.
+  expect(mr.body).not.toContain('claude.ai/code/session')
   expect(s.log).toEqual(['comment:<!-- factory:approval mr=https://host/g/p/-/merge_requests/3 -->', 'label:mr-open'])
 })
 
@@ -426,14 +442,14 @@ test('verify re-entry after setStation throws: no second report, fix loops uncha
   expect(r.to).toBe('build')
   expect(s.state.comments.filter((x) => x.body.startsWith('<!-- factory:test-report')).length).toBe(1)
   expect(await fixLoopsOfJob(s)).toBe(loops)
-  expect(s.runs.filter((a) => a[0] === 'sh').length).toBe(1)
+  expect(s.runs.filter((a) => isSh(a)).length).toBe(1)
 })
 
 test('verify re-runs when the branch moved since the posted report', async () => {
   const s = setup('verify', [...dossier(), c('t', '<!-- factory:test-report passed=false sha=0000000 -->', 5)])
   const r = await advance(ref, s.deps)
   expect(r.to).toBe('review')
-  expect(s.runs.some((a) => a[0] === 'sh')).toBe(true)
+  expect(s.runs.some((a) => isSh(a))).toBe(true)
 })
 
 test('review re-entry after setStation throws: no second verdicts, fix loops unchanged', async () => {
@@ -546,9 +562,9 @@ test('failed verify then no-commit build proceeds to verify, which runs fresh', 
   const s = setup('verify', dossier(), { verifyExit: 1, agents: { builder: 'nothing to change\nBUILD-DONE' } })
   expect((await advance(ref, s.deps)).to).toBe('build')
   expect((await advance(ref, s.deps)).to).toBe('verify')
-  const shBefore = s.runs.filter((a) => a[0] === 'sh').length
+  const shBefore = s.runs.filter((a) => isSh(a)).length
   await advance(ref, s.deps)
-  expect(s.runs.filter((a) => a[0] === 'sh').length).toBe(shBefore + 1)
+  expect(s.runs.filter((a) => isSh(a)).length).toBe(shBefore + 1)
 })
 
 test('failed verdict then no-commit build is still blocked after the retry', async () => {
@@ -564,14 +580,14 @@ test('verify with cached failed report and newer trusted /retry runs fresh', asy
   const s = setup('verify', [...dossier(), c('t', '<!-- factory:test-report passed=false sha=aaaaaaa -->\nflaky', 5), c('r', '/retry', 6, 'alice', true)])
   const r = await advance(ref, s.deps)
   expect(r.to).toBe('review')
-  expect(s.runs.some((a) => a[0] === 'sh')).toBe(true)
+  expect(s.runs.some((a) => isSh(a))).toBe(true)
 })
 
 test('verify with cached failed report and untrusted /retry replays the cache', async () => {
   const s = setup('verify', [...dossier(), c('t', '<!-- factory:test-report passed=false sha=aaaaaaa -->\nflaky', 5), c('r', '/retry', 6, 'mallory', false)])
   const r = await advance(ref, s.deps)
   expect(r.to).toBe('build')
-  expect(s.runs.some((a) => a[0] === 'sh')).toBe(false)
+  expect(s.runs.some((a) => isSh(a))).toBe(false)
   expect(s.log).toEqual(['label:build'])
 })
 
@@ -599,7 +615,7 @@ test('push and empty re-verify commit run git with hooks disabled', async () => 
   }
   for (const argv of s.runs.filter((a) => a.includes('git'))) {
     expect(argv).toContain('core.hooksPath=/dev/null')
-    expect(argv.slice(0, 3)).toEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1'])
+    expect(argv.slice(0, 11)).toEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1'])
   }
 })
 
@@ -623,8 +639,8 @@ test('R21: push and commit-tree run in a fresh bare repo, never the agent dir or
   expect(dirOf(ct)).toBe(dirOf(push))
   const bare = dirOf(push)!
   const init = s.runs.findIndex((a) => a.includes('init') && a.includes(bare))
-  expect(s.runs[init]).toEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/', 'init', '--bare', '--quiet', bare])
-  expect(s.runs).toContainEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', bare, 'fetch', '--no-tags', WT, '+HEAD:refs/factory/build'])
+  expect(s.runs[init]).toEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/', 'init', '--bare', '--quiet', bare])
+  expect(s.runs).toContainEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', bare, 'fetch', '--no-tags', WT, '+HEAD:refs/factory/build'])
   const removed = s.runs.findIndex((a) => a[0] === 'rm' && a.at(-1) === bare)
   expect(removed).toBeGreaterThan(s.runs.indexOf(push))
   // no checkout ever runs in the bare repo (no smudge filters)
@@ -746,4 +762,63 @@ test('fix4: token-bearing ls-remote, clone and init run with -C / (no repo disco
   expect(tokenless.some((a) => a.includes('clone'))).toBe(true)
   expect(tokenless.some((a) => a.includes('init'))).toBe(true)
   for (const a of tokenless) expect(a.slice(a.indexOf('git'), a.indexOf('git') + 7)).toEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/'])
+})
+
+// ---- final review fixes ----
+const subOf = (argv: string[]) => { const i = argv.indexOf('-C'); return i < 0 ? undefined : argv[i + 2] }
+
+test('final I4: network git calls (clone, fetch, push, ls-remote) get the 10 min timeout', async () => {
+  const b = setup('build', dossier(), { agents: { builder: 'ok\nBUILD-DONE' } })
+  await advance(ref, b.deps)
+  const v = setup('verify', [...dossier(), c('t', '<!-- factory:test-report passed=false sha=0000000 -->', 5)])
+  await advance(ref, v.deps)
+  const r = setup('review', [...dossier(), c('t', REPORT_OK, 5)], {
+    agents: { 'code-reviewer': 'VERDICT: pass\n- none', 'security-reviewer': 'VERDICT: pass\n- none' },
+  })
+  await advance(ref, r.deps)
+  const seen = new Set<string>()
+  for (const s of [b, v, r]) {
+    s.runs.forEach((argv, i) => {
+      const sub = subOf(argv)
+      if (!argv.includes('git') || !sub || !['clone', 'fetch', 'push', 'ls-remote'].includes(sub)) return
+      seen.add(sub)
+      expect({ sub, timeoutMs: s.runOpts[i].timeoutMs }).toEqual({ sub, timeoutMs: 600000 })
+    })
+  }
+  expect([...seen].sort()).toEqual(['clone', 'fetch', 'ls-remote', 'push'])
+})
+
+test('final I4: a failed verify clone retries once then blocks; no test report, no fix loop counted', async () => {
+  const s = setup('verify', dossier(), { cloneFail: true })
+  const r = await advance(ref, s.deps)
+  expect(r.to).toBe('blocked')
+  expect(s.runs.filter((a) => a.includes('clone')).length).toBe(2)
+  expect(s.state.comments.some((x) => x.body.startsWith('<!-- factory:test-report'))).toBe(false)
+  const blocked = s.state.comments.at(-1)!.body
+  expect(blocked.startsWith('<!-- factory:blocked station=verify -->')).toBe(true)
+  expect(blocked).toContain('failed twice')
+  expect(blocked).not.toContain(SECRET)
+  expect(fixLoopsOf(s.state)).toBe(0)
+  expect(s.runs.some((a) => isSh(a))).toBe(false)
+})
+
+test('final M7: a truncated diff/log is marked in the file and the reviewers are told', async () => {
+  const s = setup('review', [...dossier(), c('t', REPORT_OK, 5)], {
+    diffTruncated: true,
+    agents: { 'code-reviewer': 'VERDICT: pass\n- none', 'security-reviewer': 'VERDICT: pass\n- none' },
+  })
+  await advance(ref, s.deps)
+  const NOTE = '[factory: diff truncated at 4 MiB — review incomplete]'
+  expect(s.files[`${WT}/.factory/branch.diff`].trimEnd().endsWith(NOTE)).toBe(true)
+  expect(s.files[`${WT}/.factory/branch.log`].trimEnd().endsWith(NOTE)).toBe(true)
+  for (const role of ['code-reviewer', 'security-reviewer']) expect(s.prompts[role][0]).toContain('truncated at 4 MiB')
+})
+
+test('final M7: a whole diff carries no truncation note and the prompt does not mention it', async () => {
+  const s = setup('review', [...dossier(), c('t', REPORT_OK, 5)], {
+    agents: { 'code-reviewer': 'VERDICT: pass\n- none', 'security-reviewer': 'VERDICT: pass\n- none' },
+  })
+  await advance(ref, s.deps)
+  expect(s.files[`${WT}/.factory/branch.diff`]).not.toContain('truncated')
+  expect(s.prompts['code-reviewer'][0]).not.toContain('truncated at 4 MiB')
 })

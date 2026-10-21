@@ -217,8 +217,9 @@ function uiActions($: Engine, st: State): Actions {
     await update($, detailAtom, () => null)
   }
   /**
-   * Posts the decision through the forge, marks the job decided at once, then
-   * re-ticks it under the shared lock. When no tick ran (one was in flight, or
+   * Posts the decision through the forge and marks the job decided at once, inside
+   * the press; the re-tick is scheduled on the clock so the press returns promptly.
+   * The re-tick runs under the shared lock. When no tick ran (one was in flight, or
    * the run refused), the views are re-read so the buttons go anyway.
    */
   const decide = async (cmd: { kind: 'approve'; issue: string } | { kind: 'revise'; issue: string; notes: string }) => {
@@ -228,12 +229,18 @@ function uiActions($: Engine, st: State): Actions {
     await say(d.text)
     if (!d.posted) return
     await update($, jobsAtom, (jobs) => jobs.map((j) => (sameRef(j.ref, d.ref) ? { ...j, needsHuman: false } : j)))
-    const ticks = st.ticks
-    const ran = await handle({ kind: 'run', issue: jobKey(d.ref) }, env)
-    if (st.ticks === ticks) {
-      await say(`${d.text}\n${ran}`)
-      await refresh($, st)
-    }
+    $.clock.after(0, () => {
+      void (async () => {
+        const ticks = st.ticks
+        const ran = await handle({ kind: 'run', issue: jobKey(d.ref) }, await buildEnv($, st))
+        if (st.ticks === ticks) {
+          await say(`${d.text}\n${ran}`)
+          await refresh($, st)
+        }
+      })().catch((err) => {
+        $.ui.log(redact(`factory re-tick failed: ${err instanceof Error ? err.message : String(err)}`, st.secrets), { to: 'debug' })
+      })
+    })
   }
   const actions: Actions = {
     select: (ref) => show(ref, false),
@@ -356,7 +363,8 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
     if (opts.timeoutMs !== undefined) init.timeoutMs = opts.timeoutMs
     try {
       const r = await $.process.run(argv, init)
-      return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr }
+      // `truncated`: stdout was cut at 4 MiB (branch.diff/branch.log get a note, the reviewers a warning).
+      return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr, ...(r.isStdoutTruncated ? { truncated: true } : {}) }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       // $.process.run rejects "... aborted: still running after <ms>ms" on timeout.

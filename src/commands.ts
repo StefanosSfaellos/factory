@@ -2,7 +2,7 @@ import type { Forge } from './forge/types'
 import { fixLoopsOf, specDecision, stationOf } from './machine'
 import { redact } from './redact'
 import type { Deps } from './stations'
-import { tick, type Project, type TickResult } from './tick'
+import { ownMarkersOnly, tick, type Project, type TickResult } from './tick'
 import type { JobRef, Station } from './types'
 
 // `/factory` subcommands: parsing, issue-ref resolution and the handlers.
@@ -201,7 +201,9 @@ async function status(env: Env, issue?: string): Promise<string> {
     if ('error' in r) return r.error
     const f = env.forgeFor(r.ref.forge)
     if ('error' in f) return f.error
-    const job = await f.forge.getJob(r.ref)
+    // R6: only the factory's own markers count; forged ones are ignored.
+    const raw = await f.forge.getJob(r.ref)
+    const job = { ...raw, comments: ownMarkersOnly(raw.comments, await f.forge.whoami()) }
     const st = stationOf(job)
     const where = 'invalid' in st ? `invalid (${st.invalid})` : st.station
     const loops = fixLoopsOf(job)
@@ -217,8 +219,10 @@ async function status(env: Env, issue?: string): Promise<string> {
       const refs = await f.forge.listJobs(p.project)
       total += refs.length
       const byStation = new Map<string, number[]>()
+      const me = refs.length > 0 ? await f.forge.whoami() : ''
       for (const ref of refs) {
-        const job = await f.forge.getJob(ref)
+        const raw = await f.forge.getJob(ref)
+        const job = { ...raw, comments: ownMarkersOnly(raw.comments, me) }
         const st = stationOf(job)
         let key = 'invalid' in st ? 'invalid' : st.station
         if (key === 'awaiting-spec' && 'none' in specDecision(job)) key = 'awaiting-spec (needs you)'

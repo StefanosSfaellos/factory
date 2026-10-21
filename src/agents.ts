@@ -1,4 +1,5 @@
 import { modelFor, type Role, type RepoConfig } from './config'
+import { NO_TOKENS } from './worktree'
 
 // Child-agent runner. Each station runs one role agent as a child `claude -p`
 // process with this plugin loaded. Pure: the process is started only through
@@ -32,8 +33,9 @@ const READ_ONLY: Role[] = ['spec-writer', 'designer', 'planner', 'code-reviewer'
  * docs give (code.claude.com/docs/en/sandboxing): `sandbox.enabled`, no unsandboxed
  * retry, the forge tokens denied to sandboxed commands, the repo's
  * `sandbox.allowedDomains` as `sandbox.network.allowedDomains`, and
- * `failIfUnavailable` only when the repo sets `sandbox.required: true` (otherwise a
- * host without the sandbox runs children unsandboxed). Its default write scope is
+ * `failIfUnavailable` only when the repo sets `sandbox.required: true` (otherwise, on a
+ * host without the sandbox, the builder's Bash runs uncontained but still filtered by
+ * the gate, R25). Its default write scope is
  * the working directory (the job's agent dir) and the per-user temp directory.
  */
 export function childSettings(cfg: RepoConfig): string {
@@ -57,7 +59,7 @@ const PROGRESS_MAX = 120
 export function childArgv(o: ChildOpts): string[] {
   const argv = [
     // R18: the agent never sees the forge credentials; the mod does all forge I/O.
-    'env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL',
+    ...NO_TOKENS,
     `FACTORY_ROLE=${o.role}`,
     `FACTORY_JOB=${o.job}`,
     `FACTORY_WORKTREE=${o.worktree}`,
@@ -73,8 +75,11 @@ export function childArgv(o: ChildOpts): string[] {
     '--output-format', 'stream-json',
     '--verbose',
   ]
-  if (o.cfg.allowedTools.length > 0) argv.push('--allowedTools', ...o.cfg.allowedTools)
+  // R25: `-p --permission-mode acceptEdits` denies Bash where the sandbox cannot run, so
+  // the builder (and only the builder) is always allowed Bash plus the repo's tools. The
+  // tool.call gate filters its commands; the sandbox, when available, contains them.
   if (READ_ONLY.includes(o.role)) argv.push('--disallowedTools', 'Edit', 'Write', 'NotebookEdit')
+  else argv.push('--allowedTools', 'Bash', ...o.cfg.allowedTools)
   return argv
 }
 

@@ -54,13 +54,25 @@ for (const [name, st, ev, want, loops] of rows) {
   })
 }
 
+test('R27: with fixLoops 3, the 3rd failure still loops back to build (verify and review)', () => {
+  const a = next('verify', { kind: 'verify', passed: false }, ctx(2))
+  expect(a).toEqual({ station: 'build', fixLoops: 3, reason: 'verify failed' })
+  const b = next('review', { kind: 'verdicts', verdicts: [v('code-reviewer', false), v('security-reviewer', true)] }, ctx(2))
+  expect(b.station).toBe('build')
+  expect(b.fixLoops).toBe(3)
+})
+test('R27: with fixLoops 3, the 4th failure blocks', () => {
+  const r = next('verify', { kind: 'verify', passed: false }, ctx(3))
+  expect(r.station).toBe('blocked')
+  expect(r.reason).toContain('(4/3)')
+})
 test('fix loop limit blocks (verify)', () => {
-  const r = next('verify', { kind: 'verify', passed: false }, ctx(2))
+  const r = next('verify', { kind: 'verify', passed: false }, ctx(3))
   expect(r.station).toBe('blocked')
   expect(r.reason).toContain('fix loop')
 })
 test('fix loop limit blocks (review)', () => {
-  const r = next('review', { kind: 'verdicts', verdicts: [v('code-reviewer', false), v('security-reviewer', true)] }, ctx(2))
+  const r = next('review', { kind: 'verdicts', verdicts: [v('code-reviewer', false), v('security-reviewer', true)] }, ctx(3))
   expect(r.station).toBe('blocked')
   expect(r.reason).toContain('fix loop')
 })

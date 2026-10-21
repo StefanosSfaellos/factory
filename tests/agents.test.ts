@@ -12,8 +12,8 @@ function after(argv: string[], flag: string): string | undefined {
 
 test('childArgv: env prefix, claude invocation and namespaced agent', () => {
   const a = childArgv({ ...base, role: 'planner' })
-  expect(a.slice(0, 16)).toEqual([
-    'env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL',
+  expect(a.slice(0, 18)).toEqual([
+    'env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN',
     'FACTORY_ROLE=planner', 'FACTORY_JOB=gitlab:g/p#7', 'FACTORY_WORKTREE=/wt',
     'FACTORY_SPEC_FILE=/wt/.factory/spec.md', 'FACTORY_PROTECTED=', 'FACTORY_FORGE_HOSTS=', 'claude', '-p', 'do it',
   ])
@@ -57,7 +57,7 @@ test('childArgv: passes protectedPaths to the child gate as FACTORY_PROTECTED', 
 test('childArgv: forge tokens are unset in the child (R18); forge hosts passed for the gate', () => {
   const a = childArgv({ ...base, role: 'builder', forgeHosts: ['github.com', 'api.github.com', 'lab.example.gr'] })
   const claude = a.indexOf('claude')
-  for (const v of ['GITHUB_TOKEN', 'GITLAB_TOKEN', 'GITLAB_URL']) {
+  for (const v of ['GITHUB_TOKEN', 'GITLAB_TOKEN', 'GITLAB_URL', 'FACTORY_GITLAB_TOKEN']) {
     const i = a.indexOf(v)
     expect(a[i - 1]).toBe('-u')
     expect(i).toBeLessThan(a.indexOf('FACTORY_ROLE=builder'))
@@ -81,12 +81,28 @@ test('childArgv: approver and other reviewers are read-only, builder is not', ()
   expect(childArgv({ ...base, role: 'builder' })).not.toContain('--disallowedTools')
 })
 
-test('childArgv: builder gets repo allowedTools and model override', () => {
+test('childArgv: builder gets Bash plus the repo allowedTools, and the model override', () => {
   const c = { ...cfg, allowedTools: ['Bash(composer *)', 'Bash(php *)'], models: { builder: 'opus' } } as RepoConfig
   const a = childArgv({ ...base, cfg: c, role: 'builder' })
   const i = a.indexOf('--allowedTools')
-  expect(a.slice(i + 1, i + 3)).toEqual(['Bash(composer *)', 'Bash(php *)'])
+  expect(a.slice(i + 1)).toEqual(['Bash', 'Bash(composer *)', 'Bash(php *)'])
   expect(after(a, '--model')).toBe('opus')
+})
+
+test('childArgv: R25 builder always gets --allowedTools Bash (acceptEdits alone denies Bash without the sandbox)', () => {
+  const a = childArgv({ ...base, role: 'builder' })
+  const i = a.indexOf('--allowedTools')
+  expect(i).toBeGreaterThan(-1)
+  expect(a.slice(i + 1)).toEqual(['Bash'])
+})
+
+test('childArgv: R25 read-only roles never get --allowedTools, even when the repo lists tools', () => {
+  const c = { ...cfg, allowedTools: ['Bash(composer *)'] } as RepoConfig
+  for (const role of ['spec-writer', 'designer', 'planner', 'code-reviewer', 'security-reviewer', 'ux-reviewer', 'approver'] as const) {
+    const a = childArgv({ ...base, cfg: c, role })
+    expect(a).not.toContain('--allowedTools')
+    expect(a).not.toContain('Bash')
+  }
 })
 
 const asst = (text: string) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } })
