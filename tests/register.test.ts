@@ -66,15 +66,18 @@ test('an interactive session ticks every tickMinutes until paused', { options: {
   on('http.fetch', (_, e) => { if (e.url.includes('/issues?')) listings.push(e.url); return e.url.endsWith('/user') ? json({ username: 'bot' }) : json([]) })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  // Nothing of the UI has been drawn, so each tick lists the jobs once and re-reads no views.
+  // One view refresh at session start; then each tick lists the jobs once and the UI re-reads them once.
+  await clock.advance(0)
+  const base = listings.length
+  expect(base).toBe(1)
   await clock.advance(10 * 60000)
-  expect(listings.length).toBe(1)
+  expect(listings.length).toBe(base + 2)
   expect((await $.command.run({ command: 'factory', args: 'pause' })).text).toContain('paused')
   await clock.advance(30 * 60000)
-  expect(listings.length).toBe(1)
+  expect(listings.length).toBe(base + 2)
   expect((await $.command.run({ command: 'factory', args: 'resume' })).text).toContain('resumed')
   await clock.advance(10 * 60000)
-  expect(listings.length).toBe(2)
+  expect(listings.length).toBe(base + 4)
 })
 
 test('/factory approve posts /approve on an issue awaiting a spec decision', { options: { repos: 'gitlab:g/p' } }, async ($, on) => {

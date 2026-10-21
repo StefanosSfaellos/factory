@@ -225,6 +225,32 @@ test('Approve while a tick holds the lock: posted, no deadlock, the buttons go',
   await ui.unmount()
 })
 
+test('the band has counts from session start, before any tick or /factory', { options: { repos: 'gitlab:g/p' } }, async ($, on) => {
+  gitlab(on, [{ iid: 1, title: 'A', station: 'build' }, { iid: 2, title: 'B', station: 'review' }])
+  const { clock } = await startParent($, on, { GITLAB_TOKEN: 'glpat-abcdefghijklmnop' })
+  await clock.advance(0)
+  for (let i = 0; i < 20; i++) await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await band.find({ type: 'Text', text: /^Factory/ }))?.text).toBe('Factory · 1 building · 1 in review')
+  await band.unmount()
+})
+
+test('a tick that ends before anything is drawn still leaves fresh counts for the band', { options: { repos: 'gitlab:g/p', workerId: 'w1' } }, async ($, on) => {
+  gitlab(on, [{ iid: 4, title: 'Add VAT', station: 'spec' }], 'forge: gitlab\ntest: "npm test"\n')
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout' as const, text: '{"type":"result","subtype":"success","result":"## Goal\\nx"}\n' }
+    return { value: { code: 0, signal: null } }
+  } as any)
+  await startParent($, on, { GITLAB_TOKEN: 'glpat-abcdefghijklmnop', HOME: '/home/u' })
+  // No pane opened and no band drawn yet: the tick moves #4 from spec to awaiting-spec.
+  expect((await $.command.run({ command: 'factory', args: 'tick' })).text).toContain('spec -> awaiting-spec')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await band.find({ type: 'Text', text: /^Factory/ }))?.text).toBe('Factory · 1 needs you')
+  expect(await band.find({ key: 'review-4' })).toBeDefined()
+  await band.unmount()
+})
+
 test('no secret reaches the drawing', { options: { repos: 'gitlab:g/p' } }, async ($, on) => {
   gitlab(on, [{ iid: 5, title: 'Leaks glpat-abcdefghijklmnop here', station: 'build' }])
   await startParent($, on, { GITLAB_TOKEN: 'glpat-abcdefghijklmnop' })

@@ -59,8 +59,6 @@ type State = {
   uiQueue: Promise<void>
   /** Ticks this session finished; a press tells by it whether its re-tick ran. */
   ticks: number
-  /** Set once the band or the pane has been drawn: until then a tick re-reads no views. */
-  drawn: boolean
 }
 
 export const register: Register = (on, options) => {
@@ -80,7 +78,6 @@ export const register: Register = (on, options) => {
     secrets: [],
     uiQueue: Promise.resolve(),
     ticks: 0,
-    drawn: false,
   }
 
   on('session.start', async ($, e, next) => {
@@ -98,6 +95,11 @@ export const register: Register = (on, options) => {
     })
     st.interactive = e.isInteractive
     startTicker($, st)
+    // One view refresh as the session opens, so the band has counts before the first tick.
+    // Work that outlives the hook starts from session.start on a $.clock timer.
+    if (st.interactive && st.projects.length > 0) {
+      $.clock.after(0, () => { void refresh($, st).catch(() => { /* the UI is best-effort */ }) })
+    }
     return started
   })
 
@@ -127,7 +129,6 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'factory' }, async ($, e) => {
     const cmd = parseCommand(e.args)
     if (cmd.kind === 'open' && st.parent && st.interactive) {
-      st.drawn = true
       await openPane($)
       await refresh($, st)
       return {}
@@ -139,7 +140,6 @@ export const register: Register = (on, options) => {
   // The band above the prompt: one summary line, and a Review button per spec waiting on a person.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (!st.parent || e.props.hasSurvey || st.projects.length === 0) return next(e)
-    st.drawn = true
     if (!(await read($, loadedAtom))) return next(e)
     const jobs = await read($, jobsAtom)
     const el = $.ui.resolve(e) as unknown as Elements<RenderElement>
@@ -149,7 +149,6 @@ export const register: Register = (on, options) => {
   // The pipeline pane `/factory` opens.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (!st.parent) return next(e)
-    st.drawn = true
     const jobs = await read($, jobsAtom)
     const selected = await read($, selectedAtom)
     const detail = await read($, detailAtom)
@@ -264,7 +263,6 @@ async function afterTick($: Engine, st: State, r: TickResult): Promise<void> {
     const text = transitionToast(a)
     if (text) $.ui.toast(redact(text, st.secrets))
   }
-  if (!st.drawn) return
   await refresh($, st)
   $.ui.invalidate('ui.render')
 }
