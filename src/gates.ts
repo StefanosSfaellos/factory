@@ -152,7 +152,7 @@ function builderShell(cmd: string, ctx: GateCtx): GateResult {
   const f = flatten(cmd)
   // `/proc` only as an absolute path at a word start (not `src/proc/x`), `environ`
   // only as a word (not `environment`).
-  if (/(^|[\s=:'"(<>;|&])\/proc(?=[/\s;|&)<>]|$)/.test(f) || /\benviron\b/.test(f)) {
+  if (/(^|[\s=:'"(<>;|&])\/proc(?=[/\s;|&)<>]|$)/.test(f) || /\benviron\b/.test(f) || procEntry(f)) {
     return deny('reading /proc or process environments is not allowed.')
   }
   if (touches(cmd, GIT_HOOKS_PATH)) return deny('touching .git/hooks is not allowed.')
@@ -175,6 +175,20 @@ function builderShell(cmd: string, ctx: GateCtx): GateResult {
     }
   }
   return ALLOW
+}
+
+/**
+ * A proc entry anywhere in the flattened command, relative or absolute: `proc/self`,
+ * `proc/thread-self`, `proc/<digits>`, `proc/$PPID`, or a glob right after `proc/`
+ * (`../../proc/s*`); or `cd`/`pushd` into a path whose last segment is `proc`.
+ * Project paths such as `src/proc/handler.c` stay allowed.
+ */
+function procEntry(f: string): boolean {
+  const re = /(?<![a-z0-9_.-])proc\/+([^/\s;|&<>()]*)/g
+  for (let m = re.exec(f); m; m = re.exec(f)) {
+    if (/^(self|thread-self|\d|\$)/.test(m[1]) || /[*?[]/.test(m[1])) return true
+  }
+  return /(^|[\s;|&(])(cd|pushd)(\s+-\S*)*\s+(\S*\/)?proc\/*(?=[\s;|&)]|$)/.test(f)
 }
 
 /** ps options whose next word is a value (`-o pid,user`), never a BSD flag group. */

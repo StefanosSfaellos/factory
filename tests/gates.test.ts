@@ -322,6 +322,18 @@ test('fix4: builder shell allows "environment" and project proc/ paths, denies /
   ]) expect(denied(gate(bash(c), ctx('builder')))).toBe(true)
 })
 
+// ---- Task 10 fix round 5 ----
+test('fix5: builder shell denies relative and globbed proc entries anywhere', () => {
+  for (const c of [
+    'cat ../../../proc/self/env*', 'cd ../../proc && cat self/env*', 'cat /w/../proc/self/envi?on', 'cat /proc/1/environ',
+    'cat proc/thread-self/status', 'cat ../proc/$PPID/cmdline', 'cat ../proc/[0-9]*/cmdline', 'cd src/proc', 'pushd ../proc/',
+  ]) expect(denied(gate(bash(c), ctx('builder')))).toBe(true)
+  for (const c of [
+    'cat src/proc/handler.c', 'cat app/proc/x', 'pytest tests/test_environment.py', 'make -C src/proc', 'ls ./proc/x',
+    'cd src/proc/sub', 'cd processing',
+  ]) expect(gate(bash(c), ctx('builder'))).toEqual({ allow: true })
+})
+
 test('fix4: ps denies only BSD-style e flags', () => {
   for (const c of ['ps -o pid,user,time', 'ps -ef', 'ps aux', 'ps -p 1 -o comm', 'ps -e', 'ps --sort=-pcpu'])
     expect(gate(bash(c), ctx('builder'))).toEqual({ allow: true })
