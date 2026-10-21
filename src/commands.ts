@@ -116,6 +116,13 @@ export type Env = {
   /** Builds Deps.loadConfig for a forge. */
   loadConfigFor: (forge: Forge) => Deps['loadConfig']
   parallel: number
+  /**
+   * One in-flight flag shared by the session ticker and every command that
+   * advances jobs: two ticks of one worker would both "renew" the same lease.
+   */
+  lock: { busy: boolean }
+  /** Set when jobs cannot run here (e.g. HOME is empty); tick and run answer it. */
+  workError?: string
   setPaused: (paused: boolean) => void
   isPaused: () => boolean
 }
@@ -162,6 +169,19 @@ async function runTick(env: Env, only?: JobRef): Promise<string> {
   return summarizeTick(out)
 }
 
+const BUSY = 'a tick is already running; try again when it ends'
+
+/** Runs `fn` holding the shared tick lock, or answers that a tick is already running. */
+async function exclusive(env: Env, fn: () => Promise<string>): Promise<string> {
+  if (env.lock.busy) return BUSY
+  env.lock.busy = true
+  try {
+    return await fn()
+  } finally {
+    env.lock.busy = false
+  }
+}
+
 async function status(env: Env, issue?: string): Promise<string> {
   if (issue) {
     const r = resolveIssue(issue, env.projects)
@@ -197,7 +217,7 @@ async function status(env: Env, issue?: string): Promise<string> {
       lines.push(`${p.forge}:${p.project}: error: ${errText(e)}`)
     }
   }
-  const head = `${total} job${total === 1 ? '' : 's'} in ${env.projects.length} repo${env.projects.length === 1 ? '' : 's'}${env.isPaused() ? ' (ticker paused)' : ''}`
+  const head = `${total} job${total === 1 ? '' : 's'} in ${env.projects.length} repo${env.projects.length === 1 ? '' : 's'} (worker ${env.deps.workerId}${env.isPaused() ? ', ticker paused' : ''})`
   return [head, ...lines, ...env.repoErrors].join('\n')
 }
 
@@ -234,7 +254,8 @@ async function dispatch(cmd: Command, env: Env): Promise<string> {
     case 'status': return status(env, cmd.issue)
     case 'tick':
       if (env.projects.length === 0) return noRepos(env)
-      return runTick(env)
+      if (env.workError) return env.workError
+      return exclusive(env, () => runTick(env))
     case 'approve': return decide(env, cmd.issue!, '/approve', 'approved')
     case 'revise': return decide(env, cmd.issue, `/revise ${cmd.notes}`, 'sent back for revision')
     case 'new': {
@@ -253,9 +274,20 @@ async function dispatch(cmd: Command, env: Env): Promise<string> {
       if ('error' in r) return r.error
       const f = env.forgeFor(r.ref.forge)
       if ('error' in f) return f.error
-      const job = await f.forge.getJob(r.ref)
-      if (!job.labels.some((l) => l.startsWith('factory::') && l !== 'factory::spec-approved')) await f.forge.setStation(r.ref, 'ready')
-      return runTick(env, r.ref)
+      if (env.workError) return env.workError
+      const forge = f.forge
+      const ref = r.ref
+      return exclusive(env, async () => {
+        const job = await forge.getJob(ref)
+        if (!job.labels.some((l) => l.startsWith('factory::') && l !== 'factory::spec-approved')) await forge.setStation(ref, 'ready')
+        const st = stationOf(job)
+        if (!('invalid' in st) && (st.station === 'blocked' || st.station === 'done')) {
+          return `${label(ref)} is at ${st.station}; to retry, relabel it to a station (e.g. factory::build) or comment /retry`
+        }
+        const open = await forge.listJobs(ref.project)
+        if (!open.some((o) => o.issue === ref.issue)) return `${label(ref)} not found among open factory issues`
+        return runTick(env, ref)
+      })
     }
   }
 }

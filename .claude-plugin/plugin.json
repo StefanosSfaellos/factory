@@ -13,7 +13,7 @@
     "workerId": {
       "type": "string",
       "title": "Worker id",
-      "description": "Identifier this worker uses when taking leases",
+      "description": "Identifier this worker uses when taking leases; left as \"worker\", each session uses <host>-<random>",
       "default": "worker"
     },
     "tickMinutes": {
@@ -21,6 +21,12 @@
       "title": "Tick interval (minutes)",
       "description": "How often the worker polls the forges",
       "default": 10
+    },
+    "parallel": {
+      "type": "number",
+      "title": "Parallel jobs",
+      "description": "How many jobs one tick advances at once (per forge)",
+      "default": 2
     },
     "slackWebhook": {
       "type": "string",

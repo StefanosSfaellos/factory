@@ -2,6 +2,7 @@ import { parseRepoConfig, type RepoConfig } from './config'
 import type { Forge } from './forge/types'
 import { decideLease, leaseBody, type LeaseDecision } from './lease'
 import { specDecision, stationOf } from './machine'
+import { parseMarker } from './markers'
 import { redact } from './redact'
 import { advance, type Deps } from './stations'
 import type { Comment, Job, JobRef, Station } from './types'
@@ -39,6 +40,17 @@ export async function loadRepoConfig(forge: Forge, ref: JobRef): Promise<{ ok: t
   return parseRepoConfig(text)
 }
 
+/** The newest lease comment of this worker (expired ones included), to reuse instead of posting another. */
+function newestOwnLease(comments: Comment[], workerId: string): string | undefined {
+  let best: Comment | undefined
+  for (const c of comments) {
+    const p = parseMarker(c.body)
+    if (p?.kind !== 'lease' || p.attrs.worker !== workerId) continue
+    if (!best || Date.parse(c.createdAt) >= Date.parse(best.createdAt)) best = c
+  }
+  return best?.id
+}
+
 /** Why a job is not runnable now, or null when it is. Invalid labels are runnable: advance blocks them. */
 function idleReason(job: Job): string | null {
   const st = stationOf(job)
@@ -56,6 +68,8 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   let me: string | undefined
   const whoami = async () => (me ??= await forge.whoami())
   const lease = (minutes?: number) => leaseBody(deps.workerId, deps.now(), minutes)
+  /** An expired lease is fair game for any worker. */
+  const release = (ref: JobRef, id: string) => forge.editComment(ref, id, lease(0)).catch(() => {})
   const decide = async (ref: JobRef): Promise<{ job: Job; d: LeaseDecision }> => {
     const raw = await forge.getJob(ref)
     const job = { ...raw, comments: ownMarkersOnly(raw.comments, await whoami()) }
@@ -79,15 +93,16 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   // 2. Leases, one job at a time, until `parallel` jobs are held.
   const held: { ref: JobRef; leaseId: string }[] = []
   for (const ref of candidates) {
+    let mine: string | undefined
     try {
       const first = await decide(ref)
       const why = idleReason(first.job)
       if (why) { skipped.push({ ref, reason: why }); continue }
       if (first.d.action === 'back-off') { skipped.push({ ref, reason: `leased by ${first.d.holder}` }); continue }
       if (held.length >= deps.parallel) { skipped.push({ ref, reason: 'parallel limit reached' }); continue }
-      let mine: string
-      if (first.d.action === 'renew') {
-        mine = first.d.existingId!
+      const reuse = first.d.action === 'renew' ? first.d.existingId! : newestOwnLease(first.job.comments, deps.workerId)
+      if (reuse !== undefined) {
+        mine = reuse
         await forge.editComment(ref, mine, lease())
       } else {
         mine = (await forge.comment(ref, lease())).id
@@ -95,12 +110,13 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       // Re-read: an earlier lease by another worker that raced ours wins.
       const again = await decide(ref)
       if (again.d.action === 'back-off') {
-        await forge.editComment(ref, mine, lease(0))
+        await release(ref, mine)
         skipped.push({ ref, reason: `leased by ${again.d.holder}` })
         continue
       }
       held.push({ ref, leaseId: again.d.existingId ?? mine })
     } catch (e) {
+      if (mine !== undefined) await release(ref, mine)
       skipped.push({ ref, reason: clean(`error: ${errText(e)}`) })
     }
   }
@@ -113,21 +129,26 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       renewedAt = deps.now()
       renewals.push(forge.editComment(ref, leaseId, lease()).catch(() => {}))
     }
+    // Blind renewal from inside a step (agent output, each host command), at most every RENEW_MS.
+    const keepAlive = () => { if (deps.now() - renewedAt >= RENEW_MS) renew() }
     const jobDeps: Deps = {
       ...deps,
-      // Agents stream progress while they work: renew the lease from there too,
-      // so a long station never outlives it.
-      onProgress: (r, text) => {
-        if (deps.now() - renewedAt >= RENEW_MS) renew()
-        deps.onProgress(r, text)
+      spawn: (argv, o) => deps.spawn(argv, { ...o, onLine: (line) => { keepAlive(); o.onLine(line) } }),
+      // A host command may run up to its timeout with no output (verify: 10 min): renew first
+      // whenever the lease could otherwise age past RENEW_MS before the command ends.
+      run: (argv, o) => {
+        if (deps.now() - renewedAt + (o.timeoutMs ?? 30000) >= RENEW_MS) renew()
+        return deps.run(argv, o)
       },
     }
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
-        if (step > 0 && deps.now() - renewedAt >= RENEW_MS) {
+        if (step > 0) {
+          // Before every step: re-read, and renew only while the lease is still ours (spec §9).
           const { d } = await decide(ref)
           if (d.action === 'back-off') { skipped.push({ ref, reason: `lease lost to ${d.holder}` }); return }
-          renew()
+          renewedAt = deps.now()
+          await forge.editComment(ref, leaseId, lease())
         }
         const r = await advance(ref, jobDeps)
         advanced.push({ ref, ...r })
@@ -137,8 +158,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       skipped.push({ ref, reason: clean(`error: ${errText(e)}`) })
     } finally {
       await Promise.all(renewals)
-      // Release: an expired lease is fair game for any worker.
-      await forge.editComment(ref, leaseId, lease(0)).catch(() => {})
+      await release(ref, leaseId)
     }
   }))
 

@@ -24,7 +24,8 @@ type State = {
   minutes: number
   paused: boolean
   interactive: boolean
-  ticking: boolean
+  parallel: number
+  lock: { busy: boolean }
   timer?: { cancel: () => void }
 }
 
@@ -33,17 +34,21 @@ export const register: Register = (on, options) => {
   const st: State = {
     projects: repos.projects,
     repoErrors: repos.errors,
-    workerId: typeof options.workerId === 'string' && options.workerId.trim() ? options.workerId.trim() : 'worker',
+    // Resolved at session start: the default 'worker' would be shared by every machine.
+    workerId: typeof options.workerId === 'string' ? options.workerId.trim() : '',
     minutes: typeof options.tickMinutes === 'number' && options.tickMinutes > 0 ? options.tickMinutes : DEFAULT_TICK_MINUTES,
     paused: false,
     interactive: false,
-    ticking: false,
+    // Per-repo `limits.parallel` is not used: a tick spans repos and reads no config before leasing.
+    parallel: typeof options.parallel === 'number' && options.parallel >= 1 ? Math.floor(options.parallel) : DEFAULT_PARALLEL,
+    lock: { busy: false },
   }
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     // Child sessions (an agent the factory started): no commands, no ticker. Task 10 adds gates.
     if (await $.env.get('FACTORY_ROLE')) return started
+    if (st.workerId === '' || st.workerId === 'worker') st.workerId = await sessionWorkerId($)
     await $.command.register({
       name: 'factory',
       description: 'Software factory: multi-agent build pipeline',
@@ -62,6 +67,7 @@ export const register: Register = (on, options) => {
 }
 
 async function buildEnv($: Engine, st: State): Promise<Env> {
+  if (st.workerId === '' || st.workerId === 'worker') st.workerId = await sessionWorkerId($)
   const githubToken = (await $.env.get('GITHUB_TOKEN')) ?? ''
   const gitlabToken = (await $.env.get('GITLAB_TOKEN')) ?? ''
   const gitlabUrl = (await $.env.get('GITLAB_URL')) || 'https://gitlab.com'
@@ -130,7 +136,9 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
       writeFile: (path, text) => $.fs.write(path, text),
     },
     loadConfigFor: (forge) => (ref) => loadRepoConfig(forge, ref),
-    parallel: DEFAULT_PARALLEL,
+    parallel: st.parallel,
+    lock: st.lock,
+    workError: home === '' ? 'HOME is not set; the factory needs it for its work directory (~/.factory/work)' : undefined,
     setPaused: (p) => {
       st.paused = p
       if (p) stopTicker(st)
@@ -141,16 +149,23 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
 }
 
 async function timedTick($: Engine, st: State): Promise<void> {
-  if (st.ticking || st.paused || st.projects.length === 0) return
-  st.ticking = true
+  // The shared lock in handle() skips a period while any tick or /factory run is in flight.
+  if (st.lock.busy || st.paused || st.projects.length === 0) return
   try {
     const text = await handle({ kind: 'tick' }, await buildEnv($, st))
     $.ui.log(text, { to: 'debug' })
   } catch (err) {
     $.ui.log(`factory tick failed: ${err instanceof Error ? err.message : String(err)}`, { to: 'debug' })
-  } finally {
-    st.ticking = false
   }
+}
+
+/** `<HOSTNAME|USER|host>-<6 hex>`, once per session, so no two sessions share a lease identity. */
+async function sessionWorkerId($: Engine): Promise<string> {
+  const host = (await $.env.get('HOSTNAME')) || (await $.env.get('USER')) || 'host'
+  const bytes = new Uint8Array(3)
+  crypto.getRandomValues(bytes)
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
+  return `${host.replace(/[^A-Za-z0-9._-]/g, '-')}-${hex}`
 }
 
 function startTicker($: Engine, st: State): void {

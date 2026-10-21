@@ -232,3 +232,89 @@ test('loadRepoConfig reads .factory.yml at the default branch', async () => {
   forge.readFile = async () => null
   expect(await loadRepoConfig(forge, { forge: 'gitlab', project: 'g/p', issue: 1 })).toEqual({ ok: false, error: 'no .factory.yml on trunk' })
 })
+
+test('a step longer than the renewal interval still renews (with a re-read) before the next step', async () => {
+  // The designer's run takes 12 minutes and streams nothing but its final result line.
+  const { w, deps } = world([{ issue: 20, station: 'design', comments: [
+    { id: 's', body: '<!-- factory:spec -->\nx', createdAt: iso(T0 - 2 * MIN), author: ME },
+  ] }], { agents: { designer: 'N/A', planner: '1. x', builder: 'not done' }, agentMinutes: 12 })
+  const reads: number[] = []
+  const getJob = deps.forge.getJob
+  deps.forge.getJob = async (ref) => { reads.push(w.clock.now); return getJob(ref) }
+  const r = await tick({ ...deps, projects, parallel: 2 })
+  expect(r.advanced.map((a) => a.to)).toEqual(['plan', 'build', 'blocked'])
+  const leaseId = w.jobs.get(20)!.comments.find((c) => c.body.includes('factory:lease'))!.id
+  // Before step 2 (plan) and step 3 (build): a re-read, then a renewal good for 15 min from then.
+  const afterDesign = T0 + 12 * MIN
+  expect(reads).toContain(afterDesign)
+  expect(w.edits).toContainEqual({ id: leaseId, body: leaseBody('w1', afterDesign) })
+  expect(w.edits).toContainEqual({ id: leaseId, body: leaseBody('w1', afterDesign + 12 * MIN) })
+})
+
+test('a host command that may outlast the lease renews before it starts', async () => {
+  // A verify station: its 10-minute test run streams nothing, so the lease is renewed first.
+  const { w, deps } = world([{ issue: 21, station: 'verify' }])
+  const seen: { argv: string; renewedBefore: boolean }[] = []
+  const run = deps.run
+  deps.run = async (argv, o) => {
+    const renewedBefore = w.edits.length > 0
+    seen.push({ argv: argv.join(' '), renewedBefore })
+    if (argv[0] === 'sh') w.clock.now += 9 * MIN
+    return run(argv, o)
+  }
+  await tick({ ...deps, projects, parallel: 2 })
+  const test = seen.find((x) => x.argv.startsWith('sh '))!
+  expect(test.renewedBefore).toBe(true)
+  expect(w.edits[0].body).toContain('factory:lease worker=w1')
+  expect(w.edits[0].body).not.toBe(leaseBody('w1', w.clock.now, 0))
+})
+
+test('another worker taking the lease between steps stops the job (spec §9)', async () => {
+  const { w, deps } = world([{ issue: 22, station: 'design', comments: [
+    { id: 's', body: '<!-- factory:spec -->\nx', createdAt: iso(T0 - 2 * MIN), author: ME },
+  ] }], { agents: { designer: 'N/A', planner: '1. x' }, agentMinutes: 20 })
+  // During the design step w2 posts a lease that wins (an earlier createdAt than ours, as in a race).
+  const spawn = deps.spawn
+  deps.spawn = async (argv, o) => {
+    const r = await spawn(argv, o)
+    w.jobs.get(22)!.comments.push({ id: 'w2', body: leaseBody('w2', w.clock.now + 15 * MIN), createdAt: iso(T0 - 1000), author: ME })
+    return r
+  }
+  const r = await tick({ ...deps, projects, parallel: 2 })
+  expect(r.advanced.map((a) => a.to)).toEqual(['plan'])
+  expect(r.skipped).toContainEqual({ ref: w.jobs.get(22)!.ref, reason: 'lease lost to w2' })
+  expect(w.jobs.get(22)!.labels).toEqual(['factory::plan'])
+})
+
+test('agent output renews the lease at most once per 5 minutes', async () => {
+  const { w, deps } = world([{ issue: 23, station: 'ready' }])
+  deps.spawn = async (_argv, o) => {
+    for (let i = 0; i < 12; i++) { w.clock.now += MIN; o.onLine('{"type":"system"}') }
+    o.onLine(JSON.stringify({ type: 'result', subtype: 'success', result: '## Goal\nx' }))
+    return { exitCode: 0 }
+  }
+  await tick({ ...deps, projects, parallel: 2 })
+  const leaseId = w.jobs.get(23)!.comments.find((c) => c.body.includes('factory:lease'))!.id
+  const during = w.edits.filter((e) => e.id === leaseId).map((e) => e.body)
+  // The renewal before the spec step, then from 12 one-minute lines (non-text lines too) at +5 and +10, then the release.
+  expect(during).toEqual([leaseBody('w1', T0), leaseBody('w1', T0 + 5 * MIN), leaseBody('w1', T0 + 10 * MIN), leaseBody('w1', T0 + 12 * MIN, 0)])
+})
+
+test('the newest own expired lease is reused instead of posting another', async () => {
+  const { w, deps } = world([{ issue: 24, station: 'ready', comments: [lease('w1', T0 - MIN, 'old1'), lease('w1', T0 - MIN, 'old2')] }])
+  w.jobs.get(24)!.comments[1].createdAt = iso(T0 - 2 * MIN)
+  await tick({ ...deps, projects, parallel: 2 })
+  const leases = w.jobs.get(24)!.comments.filter((c) => c.body.includes('factory:lease'))
+  expect(leases.map((c) => c.id)).toEqual(['old1', 'old2'])
+  expect(w.edits[0]).toEqual({ id: 'old2', body: leaseBody('w1', T0) })
+})
+
+test('a failing re-read after acquiring releases the lease', async () => {
+  const { w, deps } = world([{ issue: 25, station: 'ready' }])
+  let n = 0
+  const getJob = deps.forge.getJob
+  deps.forge.getJob = async (ref) => { if (++n === 2) throw new Error('502'); return getJob(ref) }
+  const r = await tick({ ...deps, projects, parallel: 2 })
+  expect(r.skipped).toEqual([{ ref: w.jobs.get(25)!.ref, reason: 'error: 502' }])
+  expect(w.edits).toEqual([{ id: 'c1', body: leaseBody('w1', T0, 0) }])
+})

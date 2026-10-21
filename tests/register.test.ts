@@ -181,3 +181,95 @@ test('a $.process.run timeout becomes timedOut, never a crash; other rejections 
   expect(blocked.startsWith('<!-- factory:blocked station=spec -->')).toBe(true)
   expect(blocked).toContain('failed (exit -1): timed out')
 })
+
+test('two concurrent ticks in one session: the second answers "already running", one advance happens', { options: { repos: 'gitlab:g/p', workerId: 'w1' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.UTC(2026, 9, 21, 12) })
+  mock.env(on, { GITLAB_TOKEN: 'glpat-abcdefghijklmnop', HOME: '/home/u' })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  const g = gitlab(on, 'spec')
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  let release!: () => void
+  const gate = new Promise<void>((r) => { release = r })
+  let spawns = 0
+  on('process.spawn', async function* () {
+    spawns++
+    await gate
+    yield { stream: 'stdout' as const, text: '{"type":"result","subtype":"success","result":"## Goal\\nx"}\n' }
+    return { value: { code: 0, signal: null } }
+  } as any)
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  const first = $.command.run({ command: 'factory', args: 'tick' })
+  for (let i = 0; i < 50 && spawns === 0; i++) await clock.settle()
+  expect(spawns).toBe(1)
+  const second = await $.command.run({ command: 'factory', args: 'run #4' })
+  expect(second.text).toContain('a tick is already running')
+  release()
+  const r = await first
+  expect(r.text).toContain('gitlab:g/p#4: spec -> awaiting-spec')
+  expect(spawns).toBe(1)
+  expect(g.issue.notes.filter((x) => x.body.startsWith('<!-- factory:spec')).length).toBe(1)
+})
+
+test('the default workerId becomes <host>-<6 hex> per session and shows in status', { options: { repos: 'gitlab:g/p' } }, async ($, on) => {
+  mock.env(on, { GITLAB_TOKEN: 'x', HOME: '/home/u', HOSTNAME: 'build01' })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('http.fetch', () => json([]))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  const r = await $.command.run({ command: 'factory', args: 'status' })
+  expect(r.text).toMatch(/\(worker build01-[0-9a-f]{6}\)/)
+  const again = await $.command.run({ command: 'factory', args: 'status' })
+  expect(again.text!.match(/build01-[0-9a-f]{6}/)![0]).toBe(r.text!.match(/build01-[0-9a-f]{6}/)![0])
+})
+
+test('an explicit workerId is kept; USER is the fallback host part', { options: { repos: 'gitlab:g/p', workerId: 'laptop' } }, async ($, on) => {
+  mock.env(on, { GITLAB_TOKEN: 'x', HOME: '/home/u', USER: 'stelios' })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('http.fetch', () => json([]))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  expect((await $.command.run({ command: 'factory', args: 'status' })).text).toContain('(worker laptop)')
+})
+
+test('/factory run on a blocked issue says how to retry; an unknown issue is not found', { options: { repos: 'gitlab:g/p', workerId: 'w1' } }, async ($, on) => {
+  mock.env(on, { GITLAB_TOKEN: 'x', HOME: '/home/u' })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('http.fetch', (_, e) => {
+    if (e.url.endsWith('/issues/4')) return json({ iid: 4, title: 'T', description: '', labels: ['factory::blocked'] })
+    if (e.url.endsWith('/issues/9')) return json({ iid: 9, title: 'T', description: '', labels: ['factory::build'] })
+    return json([])
+  })
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  expect((await $.command.run({ command: 'factory', args: 'run #4' })).text).toContain('relabel it to a station (e.g. factory::build) or comment /retry')
+  expect((await $.command.run({ command: 'factory', args: 'run #9' })).text).toContain('not found among open factory issues')
+})
+
+test('an empty HOME refuses tick and run with a message', { options: { repos: 'gitlab:g/p' } }, async ($, on) => {
+  mock.env(on, { GITLAB_TOKEN: 'x' })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('http.fetch', () => json([]))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  expect((await $.command.run({ command: 'factory', args: 'tick' })).text).toContain('HOME is not set')
+  expect((await $.command.run({ command: 'factory', args: 'run #4' })).text).toContain('HOME is not set')
+})
+
+test('the parallel option limits how many jobs one tick leases', { options: { repos: 'gitlab:g/p', workerId: 'w1', parallel: 1 } }, async ($, on) => {
+  mock.env(on, { GITLAB_TOKEN: 'x', HOME: '/home/u' })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('http.fetch', (_, e) => {
+    const u = e.url
+    if (u.endsWith('/user')) return json({ username: 'bot' })
+    if (u.includes('/issues?')) return json(u.endsWith('page=1') ? [{ iid: 1, labels: ['factory::mr-open'] }, { iid: 2, labels: ['factory::mr-open'] }] : [])
+    if (/\/issues\/\d+$/.test(u)) return json({ iid: 1, title: 'T', description: '', labels: ['factory::ready'] })
+    if (u.includes('/notes?')) return json([])
+    if (e.init?.method === 'POST') return json({ id: 7, body: 'x', created_at: '2026-10-21T00:00:00Z', author: { username: 'bot' } })
+    return json({})
+  })
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  const r = await $.command.run({ command: 'factory', args: 'tick' })
+  expect(r.text).toContain('skipped (parallel limit reached)')
+})
