@@ -3,13 +3,14 @@ import { fixLoopsOf, specDecision, stationOf } from './machine'
 import { redact } from './redact'
 import type { Deps } from './stations'
 import { tick, type Project, type TickResult } from './tick'
-import type { JobRef } from './types'
+import type { JobRef, Station } from './types'
 
 // `/factory` subcommands: parsing, issue-ref resolution and the handlers.
 // Pure: the forges and the station deps come in from hooks/register.ts.
 
 export type Command =
   | { kind: 'open' }
+  | { kind: 'help' }
   | { kind: 'tick' }
   | { kind: 'new'; title: string; body: string }
   | { kind: 'run' | 'status' | 'approve'; issue?: string }
@@ -26,6 +27,7 @@ export const HELP = [
   '  /factory revise <issue> <notes>     send the spec back with notes',
   '  /factory status [issue]             text summary of the jobs',
   '  /factory pause | resume             stop or start the session ticker',
+  '  /factory                            open the pipeline pane (interactive sessions)',
   'Issues: #42 (when exactly one repo is configured) or gitlab:group/name#42 / github:owner/name#42.',
 ].join('\n')
 
@@ -48,6 +50,7 @@ export function parseCommand(args: string): Command {
 
   switch (word) {
     case '': return { kind: 'open' }
+    case 'help': return rest ? err('/factory help takes no arguments') : { kind: 'help' }
     case 'tick': case 'pause': case 'resume':
       return rest ? err(`/factory ${word} takes no arguments`) : { kind: word }
     case 'new': {
@@ -125,7 +128,14 @@ export type Env = {
   workError?: string
   setPaused: (paused: boolean) => void
   isPaused: () => boolean
+  /** Told every tick's result before the command answers (toasts, a refresh of the session UI). */
+  onTick?: (r: TickResult) => Promise<void> | void
+  /** Passed to tick: which station a job is running (the session UI's spinner). */
+  onStep?: (ref: JobRef, station: Station | null) => void
 }
+
+/** What `/factory` alone answers where no pane can open (a `-p` run, an SDK host). */
+export const OPEN_HEADLESS = 'factory: the pane needs an interactive session; use /factory status for a summary (/factory help lists every command)'
 
 const label = (r: JobRef) => `${r.forge}:${r.project}#${r.issue}`
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
@@ -161,10 +171,13 @@ async function runTick(env: Env, only?: JobRef): Promise<string> {
     }
     const r = await tick({
       ...env.deps, forge: f.forge, loadConfig: env.loadConfigFor(f.forge),
-      projects, parallel: env.parallel, only: only ? [only] : undefined,
+      projects, parallel: env.parallel, only: only ? [only] : undefined, onStep: env.onStep,
     })
     out.advanced.push(...r.advanced)
     out.skipped.push(...r.skipped)
+  }
+  if (env.onTick) {
+    try { await env.onTick(out) } catch { /* the UI is best-effort */ }
   }
   return summarizeTick(out)
 }
@@ -248,7 +261,8 @@ export async function handle(cmd: Command, env: Env): Promise<string> {
 async function dispatch(cmd: Command, env: Env): Promise<string> {
   switch (cmd.kind) {
     case 'error': return cmd.message
-    case 'open': return HELP
+    case 'open': return OPEN_HEADLESS
+    case 'help': return HELP
     case 'pause': env.setPaused(true); return 'ticker paused'
     case 'resume': env.setPaused(false); return 'ticker resumed'
     case 'status': return status(env, cmd.issue)

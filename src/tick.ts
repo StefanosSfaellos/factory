@@ -17,7 +17,13 @@ export type Project = { forge: 'github' | 'gitlab'; project: string }
 export type Advanced = { ref: JobRef; from: Station; to: Station; needsHuman: boolean }
 export type Skipped = { ref: JobRef; reason: string }
 export type TickResult = { advanced: Advanced[]; skipped: Skipped[] }
-export type TickDeps = Deps & { projects: Project[]; parallel: number; only?: JobRef[] }
+export type TickDeps = Deps & {
+  projects: Project[]
+  parallel: number
+  only?: JobRef[]
+  /** Told the station a held job is about to run, and `null` once its steps end (the session UI). */
+  onStep?: (ref: JobRef, station: Station | null) => void
+}
 
 const RENEW_MS = 5 * 60000
 /** Safety stop: a job never takes more steps than this in one tick. */
@@ -91,7 +97,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   }
 
   // 2. Leases, one job at a time, until `parallel` jobs are held.
-  const held: { ref: JobRef; leaseId: string }[] = []
+  const held: { ref: JobRef; leaseId: string; job: Job }[] = []
   for (const ref of candidates) {
     let mine: string | undefined
     try {
@@ -114,7 +120,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
         skipped.push({ ref, reason: `leased by ${again.d.holder}` })
         continue
       }
-      held.push({ ref, leaseId: again.d.existingId ?? mine })
+      held.push({ ref, leaseId: again.d.existingId ?? mine, job: again.job })
     } catch (e) {
       if (mine !== undefined) await release(ref, mine)
       skipped.push({ ref, reason: clean(`error: ${errText(e)}`) })
@@ -122,7 +128,12 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
   }
 
   // 3. Advance every held job concurrently.
-  await Promise.all(held.map(async ({ ref, leaseId }) => {
+  const step = (ref: JobRef, job: Job | null) => {
+    if (!deps.onStep) return
+    const st = job ? stationOf(job) : null
+    try { deps.onStep(ref, st && !('invalid' in st) ? st.station : null) } catch { /* the UI is best-effort */ }
+  }
+  await Promise.all(held.map(async ({ ref, leaseId, job: first }) => {
     let renewedAt = deps.now()
     const renewals: Promise<void>[] = []
     const renew = () => {
@@ -142,14 +153,17 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
       },
     }
     try {
-      for (let step = 0; step < MAX_STEPS; step++) {
-        if (step > 0) {
+      for (let n = 0; n < MAX_STEPS; n++) {
+        let job = first
+        if (n > 0) {
           // Before every step: re-read, and renew only while the lease is still ours (spec §9).
-          const { d } = await decide(ref)
-          if (d.action === 'back-off') { skipped.push({ ref, reason: `lease lost to ${d.holder}` }); return }
+          const again = await decide(ref)
+          if (again.d.action === 'back-off') { skipped.push({ ref, reason: `lease lost to ${again.d.holder}` }); return }
+          job = again.job
           renewedAt = deps.now()
           await forge.editComment(ref, leaseId, lease())
         }
+        step(ref, job)
         const r = await advance(ref, jobDeps)
         advanced.push({ ref, ...r })
         if (r.needsHuman || r.to === r.from || r.to === 'done' || r.to === 'blocked') break
@@ -157,6 +171,7 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     } catch (e) {
       skipped.push({ ref, reason: clean(`error: ${errText(e)}`) })
     } finally {
+      step(ref, null)
       await Promise.all(renewals)
       await release(ref, leaseId)
     }

@@ -35,12 +35,12 @@ test('/factory status without a token says which variable is missing', { options
   expect(r.text).toContain('GITHUB_TOKEN')
 })
 
-test('/factory with no args returns help; bad subcommand returns an error', async ($, on) => {
+test('/factory help returns help; bad subcommand returns an error', async ($, on) => {
   mock.env(on, {})
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: null, isInteractive: false })
-  expect((await $.command.run({ command: 'factory', args: '' })).text).toContain('/factory tick')
+  expect((await $.command.run({ command: 'factory', args: 'help' })).text).toContain('/factory tick')
   expect((await $.command.run({ command: 'factory', args: 'revise #4' })).text).toContain('notes')
 })
 
@@ -63,17 +63,18 @@ test('an interactive session ticks every tickMinutes until paused', { options: {
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 21) })
   mock.env(on, { GITLAB_TOKEN: 'x', HOME: '/home/u' })
   on('command.register', (_, e) => ({ value: { command: e.name } }))
-  on('http.fetch', (_, e) => { if (e.url.includes('/issues?')) listings.push(e.url); return json([]) })
+  on('http.fetch', (_, e) => { if (e.url.includes('/issues?')) listings.push(e.url); return e.url.endsWith('/user') ? json({ username: 'bot' }) : json([]) })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await clock.advance(10 * 60000)
-  expect(listings.length).toBe(1)
-  expect((await $.command.run({ command: 'factory', args: 'pause' })).text).toContain('paused')
-  await clock.advance(30 * 60000)
-  expect(listings.length).toBe(1)
-  expect((await $.command.run({ command: 'factory', args: 'resume' })).text).toContain('resumed')
+  // Each tick lists the jobs once, then the session UI re-reads them once.
   await clock.advance(10 * 60000)
   expect(listings.length).toBe(2)
+  expect((await $.command.run({ command: 'factory', args: 'pause' })).text).toContain('paused')
+  await clock.advance(30 * 60000)
+  expect(listings.length).toBe(2)
+  expect((await $.command.run({ command: 'factory', args: 'resume' })).text).toContain('resumed')
+  await clock.advance(10 * 60000)
+  expect(listings.length).toBe(4)
 })
 
 test('/factory approve posts /approve on an issue awaiting a spec decision', { options: { repos: 'gitlab:g/p' } }, async ($, on) => {

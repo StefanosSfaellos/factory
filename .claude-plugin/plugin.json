@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "author": { "name": "Claude", "email": "st.sfaellos@gmail.com" },
   "description": "Multi-agent build pipeline that turns GitHub/GitLab issues into merge requests",
+  "types": "./types/index.d.ts",
   "userConfig": {
     "repos": {
       "type": "string",
