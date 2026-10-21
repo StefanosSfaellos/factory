@@ -1,0 +1,8 @@
+forge: gitlab            # github | gitlab
+test: "composer test"   # command the verify station runs; must exit 0
+setup: "composer install --no-interaction"   # optional, run before test
+reviewers: [code, security, ux]   # which review stations are required
+protectedPaths: ["db/migrations/**", ".gitlab-ci.yml"]
+models: { builder: sonnet }       # optional overrides
+limits: { fixLoops: 3, parallel: 2 }
+branchPrefix: factory/
