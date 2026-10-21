@@ -1,7 +1,7 @@
 import type { RepoConfig } from './config'
 import { marker } from './markers'
 import { redact } from './redact'
-import type { RunFn } from './worktree'
+import { gitArgv, gitNoDir, type RunFn } from './worktree'
 
 const TIMEOUT_MS = 600000
 
@@ -25,14 +25,14 @@ export async function verify(
 
   if (!cfg.test || !cfg.test.trim()) return finish(false, 'No test command configured (cfg.test is blank)')
   await run(['rm', '-rf', scratchDir], {})
-  const clone = await run(['git', 'clone', '--depth', '1', '--branch', branch, cloneUrl, scratchDir], {})
+  const clone = await run(gitNoDir('clone', '--depth', '1', '--branch', branch, cloneUrl, scratchDir), {})
   if (clone.exitCode !== 0) {
     return finish(false, `Command: git clone --depth 1 --branch ${branch}\nExit code: ${clone.exitCode}\n\n${tail(`${clone.stdout}\n${clone.stderr}`.trim(), 80)}`)
   }
   // The repo's test command must not be able to read the token from the remote.
-  const scrub = await run(['git', '-C', scratchDir, 'remote', 'set-url', 'origin', publicUrl], {})
+  const scrub = await run(gitArgv(scratchDir, 'remote', 'set-url', 'origin', publicUrl), {})
   if (scrub.exitCode !== 0) return finish(false, `Command: git remote set-url origin <public url>\nExit code: ${scrub.exitCode}`)
-  const head = await run(['git', '-C', scratchDir, 'rev-parse', 'HEAD'], {})
+  const head = await run(gitArgv(scratchDir, 'rev-parse', 'HEAD'), {})
   if (head.exitCode === 0 && /^[0-9a-f]{7,64}$/.test(head.stdout.trim())) sha = head.stdout.trim()
 
   const fail = (cmd: string, r: { exitCode: number; stdout: string; stderr: string; timedOut?: boolean }, out: string) =>

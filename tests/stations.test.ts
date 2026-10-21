@@ -100,7 +100,7 @@ function setup(station: string, comments: Comment[] = [], opts: {
     if (argv.includes('push') && opts.pushStderr) return { exitCode: 128, stdout: '', stderr: opts.pushStderr }
     if (argv.includes('rev-parse') && argv.at(-1) === 'HEAD') return { exitCode: 0, stdout: `${state.head}\n`, stderr: '' }
     if (argv.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
-    if (argv[1] === 'ls-remote') return { exitCode: 0, stdout: `${state.head}\trefs/heads/x\n`, stderr: '' }
+    if (argv.includes('ls-remote')) return { exitCode: 0, stdout: `${state.head}\trefs/heads/x\n`, stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
   const files: Record<string, string> = {}
@@ -195,8 +195,8 @@ test('build writes spec file, excludes .factory/, requires BUILD-DONE and pushes
   expect(s.files['/work/gitlab/g__p/7/.factory/spec.md']).toBe('## Goal\nRound VAT.')
   expect(s.files['/work/gitlab/g__p/7/.git/info/exclude']).toContain('.factory/')
   expect(s.runs).toContainEqual(['mkdir', '-p', '/work/gitlab/g__p/7/.factory'])
-  expect(s.runs).toContainEqual(['git', '-C', '/work/gitlab/g__p/7', 'push', `https://oauth2:${SECRET}@host/g/p.git`, 'HEAD:refs/heads/factory/7-add-vat-rounding'])
-  expect(s.runs).toContainEqual(['git', '-C', '/work/gitlab/g__p/7', 'remote', 'set-url', 'origin', 'https://host/g/p.git'])
+  expect(s.runs).toContainEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/work/gitlab/g__p/7', 'push', `https://oauth2:${SECRET}@host/g/p.git`, 'HEAD:refs/heads/factory/7-add-vat-rounding'])
+  expect(s.runs).toContainEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/work/gitlab/g__p/7', 'remote', 'set-url', 'origin', 'https://host/g/p.git'])
   expect(s.log).toEqual(['label:verify'])
 })
 
@@ -571,4 +571,17 @@ test('approve checkout failure retries once then blocks instead of throwing', as
   expect(fetches).toBe(2)
   expect(s.state.comments.at(-1)!.body).toContain('station=approve')
   expect(s.counts.openMR).toBe(0)
+})
+
+// ---- fix round 3 ----
+test('push and empty re-verify commit run git with hooks disabled', async () => {
+  const s = setup('build', [...dossier(), c('t', '<!-- factory:test-report passed=false sha=aaaaaaa -->\nfail', 5)], { agents: { builder: 'nothing\nBUILD-DONE' } })
+  await advance(ref, s.deps)
+  const push = s.runs.find((a) => a.includes('push'))!
+  const empty = s.runs.find((a) => a.includes('--allow-empty'))!
+  for (const argv of [push, empty]) {
+    expect(argv).toContain('core.hooksPath=/dev/null')
+    expect(argv).toContain('core.fsmonitor=false')
+  }
+  for (const argv of s.runs.filter((a) => a[0] === 'git')) expect(argv).toContain('core.hooksPath=/dev/null')
 })

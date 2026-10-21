@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { branchName, workDir, ensureCheckout } from '../src/worktree'
+import { branchName, workDir, ensureCheckout, gitArgv } from '../src/worktree'
 import type { RunFn } from '../src/worktree'
 
 const ref = { forge: 'github' as const, project: 'acme/shop', issue: 42 }
@@ -32,13 +32,13 @@ const o = { dir: '/d', cloneUrl: 'https://x:tok123@host/r.git', publicUrl: 'http
 test('clones only when missing', async () => {
   const f = fake(false, false)
   await ensureCheckout(f.run, o)
-  expect(f.calls.some((c) => c[0] === 'git' && c[1] === 'clone')).toBe(true)
-  expect(f.calls.some((c) => c.join(' ') === 'git -C /d checkout -B factory/1-a origin/main')).toBe(true)
+  expect(f.calls.some((c) => c[0] === 'git' && c.includes('clone'))).toBe(true)
+  expect(f.calls.some((c) => c.join(' ') === 'git -c core.hooksPath=/dev/null -c core.fsmonitor=false -C /d checkout -B factory/1-a origin/main')).toBe(true)
   const g = fake(true, true)
   await ensureCheckout(g.run, o)
-  expect(g.calls.some((c) => c[1] === 'clone')).toBe(false)
-  expect(g.calls.some((c) => c.join(' ') === 'git -C /d fetch https://x:tok123@host/r.git +refs/heads/*:refs/remotes/origin/*')).toBe(true)
-  expect(g.calls.some((c) => c.join(' ') === 'git -C /d checkout -B factory/1-a origin/factory/1-a')).toBe(true)
+  expect(g.calls.some((c) => c.includes('clone'))).toBe(false)
+  expect(g.calls.some((c) => c.join(' ') === 'git -c core.hooksPath=/dev/null -c core.fsmonitor=false -C /d fetch https://x:tok123@host/r.git +refs/heads/*:refs/remotes/origin/*')).toBe(true)
+  expect(g.calls.some((c) => c.join(' ') === 'git -c core.hooksPath=/dev/null -c core.fsmonitor=false -C /d checkout -B factory/1-a origin/factory/1-a')).toBe(true)
 })
 test('errors never include the clone url', async () => {
   const f = fake(false, false, 'clone')
@@ -55,7 +55,7 @@ test('empty slug falls back to issue', () => {
 test('extra secrets redacted in checkout errors', async () => {
   const run: RunFn = async (argv) =>
     argv[0] === 'test' ? { exitCode: 1, stdout: '', stderr: '' }
-      : argv[1] === 'clone' ? { exitCode: 128, stdout: '', stderr: 'fatal: auth failed for token SECRETX' }
+      : argv.includes('clone') ? { exitCode: 128, stdout: '', stderr: 'fatal: auth failed for token SECRETX' }
       : { exitCode: 0, stdout: '', stderr: '' }
   let msg = ''
   try { await ensureCheckout(run, { ...o, secrets: ['SECRETX'] }) } catch (e) { msg = (e as Error).message }
@@ -66,7 +66,14 @@ test('extra secrets redacted in checkout errors', async () => {
 test('clone is followed immediately by set-url to the tokenless url', async () => {
   const f = fake(false, false)
   await ensureCheckout(f.run, o)
-  const i = f.calls.findIndex((c) => c[1] === 'clone')
-  expect(f.calls[i + 1]).toEqual(['git', '-C', '/d', 'remote', 'set-url', 'origin', 'https://host/r.git'])
+  const i = f.calls.findIndex((c) => c.includes('clone'))
+  expect(f.calls[i + 1]).toEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/d', 'remote', 'set-url', 'origin', 'https://host/r.git'])
   expect(f.calls.some((c) => c.includes('fetch') && c.includes('origin'))).toBe(false)
+})
+
+test('gitArgv hardens against planted hooks and fsmonitor; every git call is hardened', async () => {
+  expect(gitArgv('/d', 'status')).toEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/d', 'status'])
+  const f = fake(false, false)
+  await ensureCheckout(f.run, o)
+  for (const c of f.calls.filter((x) => x[0] === 'git')) expect(c.slice(1, 5)).toEqual(['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'])
 })

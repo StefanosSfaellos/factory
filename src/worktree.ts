@@ -6,6 +6,20 @@ export type RunFn = (
   opts: { cwd?: string; timeoutMs?: number },
 ) => Promise<{ exitCode: number; stdout: string; stderr: string; timedOut?: boolean }>
 
+// Every git command the mod runs on a directory an agent or the repo's code can
+// write to ignores planted hooks (a pre-push hook would see the token URL) and fsmonitor.
+export const GIT_SAFE = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false']
+
+/** Hardened git argv for a command run in `dir`. */
+export function gitArgv(dir: string, ...args: string[]): string[] {
+  return ['git', ...GIT_SAFE, '-C', dir, ...args]
+}
+
+/** Hardened git argv for a command with no working directory (clone, ls-remote). */
+export function gitNoDir(...args: string[]): string[] {
+  return ['git', ...GIT_SAFE, ...args]
+}
+
 export function branchName(ref: JobRef, title: string, prefix: string): string {
   const slug = title
     .toLowerCase()
@@ -30,16 +44,17 @@ export async function ensureCheckout(
     const r = await run(argv, {})
     if (r.exitCode !== 0) {
       const detail = `${r.stderr}\n${r.stdout}`.trim()
-      throw new Error(redact(`git ${argv[1] === '-C' ? argv[3] : argv[1]} failed (exit ${r.exitCode}): ${detail}`, secrets))
+      const c = argv.indexOf('-C')
+      throw new Error(redact(`git ${c >= 0 ? argv[c + 2] : argv[GIT_SAFE.length + 1]} failed (exit ${r.exitCode}): ${detail}`, secrets))
     }
     return r
   }
   const exists = (await run(['test', '-d', dir], {})).exitCode === 0
-  if (!exists) await git(['git', 'clone', cloneUrl, dir])
+  if (!exists) await git(gitNoDir('clone', cloneUrl, dir))
   // Never leave the token in the checkout: agents and test commands run here.
-  await git(['git', '-C', dir, 'remote', 'set-url', 'origin', publicUrl])
-  await git(['git', '-C', dir, 'fetch', cloneUrl, '+refs/heads/*:refs/remotes/origin/*'])
-  const remote = await run(['git', '-C', dir, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`], {})
+  await git(gitArgv(dir, 'remote', 'set-url', 'origin', publicUrl))
+  await git(gitArgv(dir, 'fetch', cloneUrl, '+refs/heads/*:refs/remotes/origin/*'))
+  const remote = await run(gitArgv(dir, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`), {})
   const from = remote.exitCode === 0 ? branch : base
-  await git(['git', '-C', dir, 'checkout', '-B', branch, `origin/${from}`])
+  await git(gitArgv(dir, 'checkout', '-B', branch, `origin/${from}`))
 }

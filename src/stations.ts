@@ -7,7 +7,7 @@ import { redact } from './redact'
 import type { Comment, Job, JobRef, Station, Verdict } from './types'
 import { verify } from './verify'
 import { runAgent, type SpawnFn } from './agents'
-import { branchName, ensureCheckout, workDir, type RunFn } from './worktree'
+import { branchName, ensureCheckout, gitArgv, gitNoDir, workDir, type RunFn } from './worktree'
 
 // Station runner: `advance` performs one station step for one job.
 // State-write order: every comment is posted first, the label changes last.
@@ -187,8 +187,8 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
     return base
   }
   const shaOf = (out: string) => { const m = /^([0-9a-f]{7,64})\b/.exec(out.trim()); return m ? m[1] : undefined }
-  const headSha = async () => shaOf((await deps.run(['git', '-C', dir, 'rev-parse', 'HEAD'], {})).stdout)
-  const remoteSha = async () => shaOf((await deps.run(['git', 'ls-remote', cloneUrl, `refs/heads/${branch}`], {})).stdout)
+  const headSha = async () => shaOf((await deps.run(gitArgv(dir, 'rev-parse', 'HEAD'), {})).stdout)
+  const remoteSha = async () => shaOf((await deps.run(gitNoDir('ls-remote', cloneUrl, `refs/heads/${branch}`), {})).stdout)
   const agent = async (role: Role, artifacts: Record<string, string>): Promise<string> => {
     const r = await runAgent(deps.spawn, {
       role, prompt: promptFor(from, role, job, artifacts), cfg, pluginRoot: deps.pluginRoot, job: jobId, worktree: dir,
@@ -245,11 +245,11 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
             if (parseMarker(lastFail.c.body)?.kind === 'verdict') throw new Error(`builder made no new commits since the failed review (head ${sha})`)
             // Unchanged code after a failed test run (e.g. a flaky test): an empty commit gives the
             // branch a new head so verify runs fresh instead of replaying the cached report.
-            await runOk(['git', '-C', dir, '-c', 'user.name=software-factory', '-c', 'user.email=software-factory@users.noreply',
-              'commit', '--allow-empty', '-m', 'chore: re-verify after failed test run'], 'git commit --allow-empty')
+            await runOk(gitArgv(dir, '-c', 'user.name=software-factory', '-c', 'user.email=software-factory@users.noreply',
+              'commit', '--allow-empty', '-m', 'chore: re-verify after failed test run'), 'git commit --allow-empty')
           }
         }
-        await runOk(['git', '-C', dir, 'push', cloneUrl, `HEAD:refs/heads/${branch}`], 'git push')
+        await runOk(gitArgv(dir, 'push', cloneUrl, `HEAD:refs/heads/${branch}`), 'git push')
         return { posts: [], event: { kind: 'build-done' } }
       }
       case 'verify': {
