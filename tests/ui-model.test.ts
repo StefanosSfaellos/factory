@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { bandText, dossierMarkdown, issueUrl, latestSpec, loadViews, mergeProgress, spinnerSuffix, toView, transitionToast, type JobView } from '../src/ui/model'
+import { isWorking, bandText, dossierMarkdown, issueUrl, latestSpec, loadViews, mergeProgress, spinnerSuffix, toView, transitionToast, type JobView } from '../src/ui/model'
 import type { Forge } from '../src/forge/types'
 import type { Comment, Job, JobRef, Station } from '../src/types'
 
@@ -128,4 +128,9 @@ test('loadViews reads every configured project and reports forge errors per proj
   expect(r.views[0].sinceMs).toBe(4 * MIN)
   expect(r.views[1].links.issue).toBe('https://gitlab.com/g/p/-/issues/2')
   expect(r.errors).toEqual(['github:o/r: GITHUB_TOKEN is not set'])
+})
+
+test('isWorking: only stations where work runs, never a queue, a wait or an end', () => {
+  expect(['spec', 'design', 'plan', 'build', 'verify', 'review', 'approve'].every((s) => isWorking(s as Station))).toBe(true)
+  expect(['ready', 'awaiting-spec', 'mr-open', 'done', 'blocked'].some((s) => isWorking(s as Station))).toBe(false)
 })

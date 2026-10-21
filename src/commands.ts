@@ -234,18 +234,29 @@ async function status(env: Env, issue?: string): Promise<string> {
   return [head, ...lines, ...env.repoErrors].join('\n')
 }
 
-async function decide(env: Env, issue: string, body: string, verb: string): Promise<string> {
-  const r = resolveIssue(issue, env.projects)
-  if ('error' in r) return r.error
-  const f = env.forgeFor(r.ref.forge)
-  if ('error' in f) return f.error
-  const job = await f.forge.getJob(r.ref)
-  const st = stationOf(job)
-  if ('invalid' in st || st.station !== 'awaiting-spec') {
-    return `${label(r.ref)} is not awaiting a spec decision (station: ${'invalid' in st ? st.invalid : st.station})`
+/** The outcome of a spec decision: posted (with the job it was posted on), or why not. */
+export type DecideResult = { posted: true; ref: JobRef; text: string } | { posted: false; text: string }
+
+/** Posts `/approve` or `/revise <notes>` on a job awaiting a spec decision. Shared by the command and the pane. */
+export async function decideSpec(env: Env, cmd: { kind: 'approve'; issue: string } | { kind: 'revise'; issue: string; notes: string }): Promise<DecideResult> {
+  const body = cmd.kind === 'approve' ? '/approve' : `/revise ${cmd.notes}`
+  const verb = cmd.kind === 'approve' ? 'approved' : 'sent back for revision'
+  const secrets = env.deps.secrets
+  try {
+    const r = resolveIssue(cmd.issue, env.projects)
+    if ('error' in r) return { posted: false, text: redact(r.error, secrets) }
+    const f = env.forgeFor(r.ref.forge)
+    if ('error' in f) return { posted: false, text: redact(f.error, secrets) }
+    const job = await f.forge.getJob(r.ref)
+    const st = stationOf(job)
+    if ('invalid' in st || st.station !== 'awaiting-spec') {
+      return { posted: false, text: redact(`${label(r.ref)} is not awaiting a spec decision (station: ${'invalid' in st ? st.invalid : st.station})`, secrets) }
+    }
+    await f.forge.comment(r.ref, body)
+    return { posted: true, ref: r.ref, text: `${label(r.ref)}: spec ${verb}; the next tick moves it on` }
+  } catch (e) {
+    return { posted: false, text: redact(errText(e), secrets) }
   }
-  await f.forge.comment(r.ref, body)
-  return `${label(r.ref)}: spec ${verb}; the next tick moves it on`
 }
 
 export async function handle(cmd: Command, env: Env): Promise<string> {
@@ -270,8 +281,8 @@ async function dispatch(cmd: Command, env: Env): Promise<string> {
       if (env.projects.length === 0) return noRepos(env)
       if (env.workError) return env.workError
       return exclusive(env, () => runTick(env))
-    case 'approve': return decide(env, cmd.issue!, '/approve', 'approved')
-    case 'revise': return decide(env, cmd.issue, `/revise ${cmd.notes}`, 'sent back for revision')
+    case 'approve': return (await decideSpec(env, { kind: 'approve', issue: cmd.issue! })).text
+    case 'revise': return (await decideSpec(env, cmd)).text
     case 'new': {
       if (env.projects.length !== 1) {
         return env.projects.length === 0 ? noRepos(env) : '/factory new needs exactly one configured repo; several are configured'

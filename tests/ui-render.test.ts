@@ -19,12 +19,15 @@ type Note = { id: number; body: string; created_at: string; author: { username: 
 
 /** A tiny GitLab in memory, answering $.http.fetch for a few issues of g/p. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function gitlab(on: any, issues: { iid: number; title: string; station: string; notes?: Note[] }[], factoryYml?: string) {
+function gitlab(on: any, issues: { iid: number; title: string; station: string; notes?: Note[] }[], factoryYml?: string, hold?: { armed: boolean; waiting: number; gate: Promise<void> }) {
   const store = new Map(issues.map((i) => [i.iid, { ...i, labels: [`factory::${i.station}`], notes: i.notes ?? [] }]))
   const posts: { url: string; body: string }[] = []
   const counts = { listings: 0 }
   let n = 100
-  on('http.fetch', (_: unknown, e: { url: string; init?: { method?: string; body?: string } }) => {
+  on('http.fetch', async (_: unknown, e: { url: string; init?: { method?: string; body?: string } }) => {
+    // Another project's listing that waits on a gate while armed: a tick holding the lock.
+    if (hold?.armed && hold.waiting === 0 && e.url.includes('/projects/g%2Fq/issues?')) { hold.waiting++; await hold.gate; return json([]) }
+    if (e.url.includes('/projects/g%2Fq/')) return json([])
     const method = e.init?.method ?? 'GET'
     const u = e.url.replace('https://gitlab.com/api/v4', '')
     if (u === '/user') return json({ username: 'bot' })
@@ -195,6 +198,31 @@ test('the spinner suffix shows only while a station runs; progress lines reach t
   expect(toasts).toContain('factory #4 needs you: awaiting-spec')
   await pane.unmount()
   await spin.unmount()
+})
+
+test('Approve while a tick holds the lock: posted, no deadlock, the buttons go', { options: { repos: 'gitlab:g/p,gitlab:g/q', workerId: 'w1' } }, async ($, on) => {
+  // Armed later: a tick that cannot finish yet, its g/q listing waiting on the gate while it holds the shared lock.
+  let release!: () => void
+  const hold = { armed: false, waiting: 0, gate: new Promise<void>((r) => { release = r }) }
+  const g = gitlab(on, [{ iid: 42, title: 'Round VAT', station: 'awaiting-spec', notes: [SPEC_NOTE] }], undefined, hold)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  const { clock } = await startParent($, on, { GITLAB_TOKEN: 'glpat-abcdefghijklmnop', HOME: '/home/u' })
+  await $.command.run({ command: 'factory', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ key: 'approve-42' })).toBeDefined()
+  hold.armed = true
+  const tick = $.command.run({ command: 'factory', args: 'tick' })
+  for (let i = 0; i < 50 && hold.waiting === 0; i++) await clock.settle()
+  expect(hold.waiting).toBe(1)
+  await ui.press({ key: 'approve-42' })
+  expect(g.posts.map((p) => p.body).filter((b) => !b.startsWith('<!--'))).toEqual(['/approve'])
+  // No re-tick ran (the lock was held), yet the job no longer asks for a decision.
+  expect(await ui.find({ key: 'approve-42' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /a tick is already running/ })).toBeDefined()
+  hold.armed = false
+  release()
+  expect((await tick).text).toContain('factory tick:')
+  await ui.unmount()
 })
 
 test('no secret reaches the drawing', { options: { repos: 'gitlab:g/p' } }, async ($, on) => {

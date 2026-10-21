@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderElement } from 'claude-code'
-import { handle, parseCommand, parseRepos, type Env } from '../src/commands'
+import { decideSpec, handle, parseCommand, parseRepos, type Env } from '../src/commands'
 import type { SpawnFn } from '../src/agents'
 import type { Forge, HttpFn } from '../src/forge/types'
 import { githubForge } from '../src/forge/github'
@@ -11,7 +11,7 @@ import type { Role } from '../src/config'
 import type { RunFn } from '../src/worktree'
 import { redact } from '../src/redact'
 import type { JobRef, Station } from '../src/types'
-import { dossierMarkdown, jobKey, latestSpec, loadViews, mergeProgress, sameRef, spinnerSuffix, transitionToast } from '../src/ui/model'
+import { dossierMarkdown, isWorking, jobKey, latestSpec, loadViews, mergeProgress, sameRef, spinnerSuffix, transitionToast } from '../src/ui/model'
 import { bandTree, paneTree, type Actions, type Elements } from '../src/ui/render'
 import type { JobDetail, RunningStation } from '../types'
 
@@ -57,6 +57,10 @@ type State = {
   secrets: string[]
   /** Spinner and progress writes, applied one after another in the order the tick raised them. */
   uiQueue: Promise<void>
+  /** Ticks this session finished; a press tells by it whether its re-tick ran. */
+  ticks: number
+  /** Set once the band or the pane has been drawn: until then a tick re-reads no views. */
+  drawn: boolean
 }
 
 export const register: Register = (on, options) => {
@@ -75,6 +79,8 @@ export const register: Register = (on, options) => {
     parent: false,
     secrets: [],
     uiQueue: Promise.resolve(),
+    ticks: 0,
+    drawn: false,
   }
 
   on('session.start', async ($, e, next) => {
@@ -121,6 +127,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'factory' }, async ($, e) => {
     const cmd = parseCommand(e.args)
     if (cmd.kind === 'open' && st.parent && st.interactive) {
+      st.drawn = true
       await openPane($)
       await refresh($, st)
       return {}
@@ -132,6 +139,7 @@ export const register: Register = (on, options) => {
   // The band above the prompt: one summary line, and a Review button per spec waiting on a person.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (!st.parent || e.props.hasSurvey || st.projects.length === 0) return next(e)
+    st.drawn = true
     if (!(await read($, loadedAtom))) return next(e)
     const jobs = await read($, jobsAtom)
     const el = $.ui.resolve(e) as unknown as Elements<RenderElement>
@@ -141,6 +149,7 @@ export const register: Register = (on, options) => {
   // The pipeline pane `/factory` opens.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (!st.parent) return next(e)
+    st.drawn = true
     const jobs = await read($, jobsAtom)
     const selected = await read($, selectedAtom)
     const detail = await read($, detailAtom)
@@ -204,27 +213,39 @@ function uiActions($: Engine, st: State): Actions {
     await update($, selectedAtom, () => null)
     await update($, detailAtom, () => null)
   }
-  /** Posts the decision through the forge, then re-ticks the job at once under the shared lock. */
-  const decide = async (ref: JobRef, cmd: { kind: 'approve'; issue: string } | { kind: 'revise'; issue: string; notes: string }) => {
+  /**
+   * Posts the decision through the forge, marks the job decided at once, then
+   * re-ticks it under the shared lock. When no tick ran (one was in flight, or
+   * the run refused), the views are re-read so the buttons go anyway.
+   */
+  const decide = async (cmd: { kind: 'approve'; issue: string } | { kind: 'revise'; issue: string; notes: string }) => {
     const env = await buildEnv($, st)
-    const posted = await handle(cmd, env)
+    const d = await decideSpec(env, cmd)
     await back()
-    await say(posted)
-    if (!/: spec (approved|sent back)/.test(posted)) return
-    const ran = await handle({ kind: 'run', issue: jobKey(ref) }, env)
-    if (!ran.startsWith('factory tick:')) await say(`${posted}\n${ran}`)
+    await say(d.text)
+    if (!d.posted) return
+    await update($, jobsAtom, (jobs) => jobs.map((j) => (sameRef(j.ref, d.ref) ? { ...j, needsHuman: false } : j)))
+    const ticks = st.ticks
+    const ran = await handle({ kind: 'run', issue: jobKey(d.ref) }, env)
+    if (st.ticks === ticks) {
+      await say(`${d.text}\n${ran}`)
+      await refresh($, st)
+    }
   }
   const actions: Actions = {
-    select: (ref) => { void show(ref, false) },
-    review: (ref) => {
-      void openPane($)
-      void show(ref, true)
+    select: (ref) => show(ref, false),
+    review: async (ref) => {
+      await openPane($)
+      await show(ref, true)
     },
-    back: () => { void back(); void say(null) },
-    approve: (ref) => decide(ref, { kind: 'approve', issue: jobKey(ref) }),
+    back: async () => {
+      await back()
+      await say(null)
+    },
+    approve: (ref) => decide({ kind: 'approve', issue: jobKey(ref) }),
     revise: (ref, notes) => {
       if (notes.trim() === '') return say('Revise needs notes: say what should change in the spec.')
-      return decide(ref, { kind: 'revise', issue: jobKey(ref), notes: notes.trim() })
+      return decide({ kind: 'revise', issue: jobKey(ref), notes: notes.trim() })
     },
     refresh: () => refresh($, st),
   }
@@ -237,11 +258,13 @@ function enqueue(st: State, fn: () => Promise<void>): void {
 
 /** After every tick of this session: toasts for moves a person must act on, then fresh views. */
 async function afterTick($: Engine, st: State, r: TickResult): Promise<void> {
+  st.ticks++
   await st.uiQueue
   for (const a of r.advanced) {
     const text = transitionToast(a)
     if (text) $.ui.toast(redact(text, st.secrets))
   }
+  if (!st.drawn) return
   await refresh($, st)
   $.ui.invalidate('ui.render')
 }
@@ -353,7 +376,11 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
       now: () => Date.now(),
       onProgress: (ref, text) => {
         $.ui.log(`factory ${ref.forge}:${ref.project}#${ref.issue}: ${text}`, { to: 'debug' })
-        if (ui) enqueue(st, () => progressed($, st, ref, text))
+        if (ui) enqueue(st, async () => {
+          await progressed($, st, ref, text)
+          // $.state writes redraw their readers; the brief also asks for an explicit invalidate here.
+          $.ui.invalidate('ui.render')
+        })
       },
       writeFile: (path, text) => $.fs.write(path, text),
     },
@@ -368,7 +395,7 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
     },
     isPaused: () => st.paused,
     onTick: ui ? (r) => afterTick($, st, r) : undefined,
-    onStep: ui ? (ref, station) => enqueue(st, () => stepChanged($, ref, station)) : undefined,
+    onStep: ui ? (ref, station) => enqueue(st, () => stepChanged($, ref, station && isWorking(station) ? station : null)) : undefined,
   }
 }
 

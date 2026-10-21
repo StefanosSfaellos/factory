@@ -21,11 +21,9 @@ export type JobView = {
   links: { issue: string; mr?: string }
 }
 
-/** The job whose station runs in this session right now. */
-export type Running = { ref: JobRef; station: Station }
-
-/** The job opened in the pane, with its spec and dossier as read from the forge. */
-export type Selected = { key: string; spec: string; dossier: string }
+const WORKING: Station[] = ['spec', 'design', 'plan', 'build', 'verify', 'review', 'approve']
+/** A station where an agent or the mod does work (not a queue, a wait on a person, or an end). */
+export const isWorking = (s: Station) => WORKING.includes(s)
 
 /** `<forge>:<project>#<issue>`: a job's identity in the UI, and its full issue reference. */
 export const jobKey = (r: JobRef) => `${r.forge}:${r.project}#${r.issue}`

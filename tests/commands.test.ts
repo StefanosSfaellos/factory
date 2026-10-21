@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
-import { parseCommand, parseRepos, resolveIssue } from '../src/commands'
+import { decideSpec, parseCommand, parseRepos, resolveIssue, type Env } from '../src/commands'
+import type { Forge } from '../src/forge/types'
 
 test('parseCommand covers every subcommand', () => {
   expect(parseCommand('')).toEqual({ kind: 'open' })
@@ -52,4 +53,22 @@ test('resolveIssue: #N needs exactly one configured repo; full refs always work'
   expect(resolveIssue('gitlab:a/b/c#9', two)).toEqual({ ref: { forge: 'gitlab', project: 'a/b/c', issue: 9 } })
   expect('error' in resolveIssue('gitlab:#9', one)).toBe(true)
   expect('error' in resolveIssue('#0', one)).toBe(true)
+})
+
+test('decideSpec returns a structured result: posted with the job, or not posted with the reason', async () => {
+  const posted: string[] = []
+  let labels = ['factory::awaiting-spec']
+  const forge = {
+    getJob: async (ref: { issue: number }) => ({ ref, title: 'T', body: '', labels, comments: [] }),
+    comment: async (_: unknown, body: string) => { posted.push(body); return { id: '1', body, createdAt: '', author: 'me' } },
+  } as unknown as Forge
+  const env = { projects: [{ forge: 'gitlab', project: 'g/p' }], repoErrors: [], forgeFor: () => ({ forge }), deps: { secrets: [] } } as unknown as Env
+  const ok = await decideSpec(env, { kind: 'revise', issue: '#4', notes: 'more tests' })
+  expect(ok).toEqual({ posted: true, ref: { forge: 'gitlab', project: 'g/p', issue: 4 }, text: 'gitlab:g/p#4: spec sent back for revision; the next tick moves it on' })
+  expect(posted).toEqual(['/revise more tests'])
+  labels = ['factory::build']
+  const no = await decideSpec(env, { kind: 'approve', issue: '#4' })
+  expect(no.posted).toBe(false)
+  expect(no.text).toContain('not awaiting a spec decision')
+  expect(posted.length).toBe(1)
 })

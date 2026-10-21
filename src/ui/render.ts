@@ -21,9 +21,9 @@ export type Elements<N> = {
 
 /** What the buttons do; a handler may return the work it started, which the surface awaits. */
 export type Actions = {
-  select: (ref: JobRef) => void
-  review: (ref: JobRef) => void
-  back: () => void
+  select: (ref: JobRef) => Promise<unknown> | void
+  review: (ref: JobRef) => Promise<unknown> | void
+  back: () => Promise<unknown> | void
   approve: (ref: JobRef) => Promise<unknown> | void
   revise: (ref: JobRef, notes: string) => Promise<unknown> | void
   refresh: () => Promise<unknown> | void
