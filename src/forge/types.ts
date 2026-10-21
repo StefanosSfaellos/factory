@@ -2,7 +2,7 @@ import type { Comment, Job, JobRef, Station } from '../types'
 
 export type HttpFn = (req: {
   url: string
-  method: 'GET' | 'POST' | 'PUT'
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH'
   headers: Record<string, string>
   body?: string
 }) => Promise<{ status: number; ok: boolean; text: string }>
