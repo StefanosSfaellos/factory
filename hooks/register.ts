@@ -5,12 +5,14 @@ import type { Forge, HttpFn } from '../src/forge/types'
 import { githubForge } from '../src/forge/github'
 import { gitlabForge } from '../src/forge/gitlab'
 import { loadRepoConfig } from '../src/tick'
+import { gate, type GateCtx } from '../src/gates'
+import type { Role } from '../src/config'
 import type { RunFn } from '../src/worktree'
 
 // The only file that touches `$`. It turns the mods API into the plain
 // functions src/ takes (HttpFn, RunFn, SpawnFn, writeFile) and wires the
 // `/factory` command and the session ticker. Child sessions (agents the
-// factory started, FACTORY_ROLE set) register nothing here.
+// factory started, FACTORY_ROLE set) get no commands or ticker, only the gate.
 
 type Engine = EngineInterface
 
@@ -60,10 +62,39 @@ export const register: Register = (on, options) => {
     return started
   })
 
+  // Gates (spec §4.2, §12): registered in every session, active only in a child
+  // (FACTORY_ROLE set). The user's own session is never gated. Fails closed.
+  const spec: { path?: string; text?: string } = {}
+  on('tool.call', async ($, e, next) => {
+    const role = await $.env.get('FACTORY_ROLE')
+    if (!role) return next(e)
+    const ctx = await gateCtx($, role as Role, spec)
+    const { tool, ...input } = e
+    const verdict = gate({ tool, input: input as Record<string, unknown> }, ctx)
+    return 'deny' in verdict ? { deny: verdict.deny } : next(e)
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'factory gate failed; action blocked' }))
+
   on('command.run', { command: 'factory' }, async ($, e) => {
     const text = await handle(parseCommand(e.args), await buildEnv($, st))
     return { text }
   })
+}
+
+async function gateCtx($: Engine, role: Role, spec: { path?: string; text?: string }): Promise<GateCtx> {
+  const worktree = (await $.env.get('FACTORY_WORKTREE')) || undefined
+  const protectedPaths = ((await $.env.get('FACTORY_PROTECTED')) ?? '').split(',').map((g) => g.trim()).filter((g) => g !== '')
+  const gitlabUrl = (await $.env.get('GITLAB_URL')) ?? ''
+  const forgeHosts = gitlabUrl === '' ? [] : [gitlabUrl.replace(/^[a-z]+:\/\//i, '').replace(/[/:].*$/, '')]
+  // The spec is written before the child starts; it is read once, at the child's first
+  // tool call, so a later change to the file by the agent itself cannot widen what it
+  // may edit. A missing file means no exceptions; a failing read fails the gate closed.
+  // Only a builder with protected paths needs it.
+  const path = (await $.env.get('FACTORY_SPEC_FILE')) ?? ''
+  if (role === 'builder' && protectedPaths.length > 0 && (spec.text === undefined || spec.path !== path)) {
+    spec.path = path
+    spec.text = path !== '' && (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+  }
+  return { role, worktree, protectedPaths, specText: spec.text ?? '', forgeHosts }
 }
 
 async function buildEnv($: Engine, st: State): Promise<Env> {

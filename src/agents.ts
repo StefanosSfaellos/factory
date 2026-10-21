@@ -32,6 +32,7 @@ export function childArgv(o: ChildOpts): string[] {
     `FACTORY_JOB=${o.job}`,
     `FACTORY_WORKTREE=${o.worktree}`,
     `FACTORY_SPEC_FILE=${o.worktree}/.factory/spec.md`,
+    `FACTORY_PROTECTED=${(o.cfg.protectedPaths ?? []).join(',')}`,
     'claude', '-p', o.prompt,
     '--plugin-dir', o.pluginRoot,
     '--agent', `software-factory:${o.role}`,

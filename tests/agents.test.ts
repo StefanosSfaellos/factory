@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { childArgv, runAgent, type SpawnFn } from '../src/agents'
 import type { RepoConfig } from '../src/config'
 
-const cfg = { models: {}, allowedTools: [] } as unknown as RepoConfig
+const cfg = { models: {}, allowedTools: [], protectedPaths: [] } as unknown as RepoConfig
 const base = { prompt: 'do it', cfg, pluginRoot: '/plug', job: 'gitlab:g/p#7', worktree: '/wt' }
 
 function after(argv: string[], flag: string): string | undefined {
@@ -12,9 +12,9 @@ function after(argv: string[], flag: string): string | undefined {
 
 test('childArgv: env prefix, claude invocation and namespaced agent', () => {
   const a = childArgv({ ...base, role: 'planner' })
-  expect(a.slice(0, 8)).toEqual([
+  expect(a.slice(0, 9)).toEqual([
     'env', 'FACTORY_ROLE=planner', 'FACTORY_JOB=gitlab:g/p#7', 'FACTORY_WORKTREE=/wt',
-    'FACTORY_SPEC_FILE=/wt/.factory/spec.md', 'claude', '-p', 'do it',
+    'FACTORY_SPEC_FILE=/wt/.factory/spec.md', 'FACTORY_PROTECTED=', 'claude', '-p', 'do it',
   ])
   expect(after(a, '--plugin-dir')).toBe('/plug')
   expect(after(a, '--agent')).toBe('software-factory:planner')
@@ -24,6 +24,11 @@ test('childArgv: env prefix, claude invocation and namespaced agent', () => {
   expect(a).toContain('--verbose')
   expect(a).not.toContain('--allowedTools')
   expect(a).not.toContain('--disallowedTools')
+})
+
+test('childArgv: passes protectedPaths to the child gate as FACTORY_PROTECTED', () => {
+  const c = { ...cfg, protectedPaths: ['db/migrations/**', '.gitlab-ci.yml'] } as RepoConfig
+  expect(childArgv({ ...base, cfg: c, role: 'builder' })).toContain('FACTORY_PROTECTED=db/migrations/**,.gitlab-ci.yml')
 })
 
 test('childArgv: security-reviewer is read-only and uses opus', () => {

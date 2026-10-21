@@ -1,0 +1,197 @@
+import { expect, mock, test } from 'claude-code/testing'
+import { gate, type GateCtx } from '../src/gates'
+import type { Role } from '../src/config'
+
+const ctx = (role: Role | undefined, extra: Partial<GateCtx> = {}): GateCtx =>
+  ({ role, worktree: '/w', protectedPaths: [], specText: '', ...extra })
+const bash = (command: string) => ({ tool: 'Bash', input: { command } })
+const edit = (file_path: string) => ({ tool: 'Edit', input: { file_path, old_string: 'a', new_string: 'b' } })
+const denied = (r: ReturnType<typeof gate>) => 'deny' in r
+const READ_ONLY: Role[] = ['spec-writer', 'designer', 'planner', 'code-reviewer', 'security-reviewer', 'ux-reviewer', 'approver']
+
+// --- brief cases ---
+
+test('builder git push is denied', () => {
+  expect(denied(gate(bash('git push origin x'), ctx('builder')))).toBe(true)
+})
+
+test('reviewer Edit is denied', () => {
+  expect(denied(gate(edit('/w/src/a.php'), ctx('code-reviewer')))).toBe(true)
+})
+
+test('builder Edit inside the worktree is allowed, outside is denied', () => {
+  expect(gate(edit('/w/src/a.php'), ctx('builder'))).toEqual({ allow: true })
+  expect(denied(gate(edit('/etc/x'), ctx('builder')))).toBe(true)
+})
+
+test('protected path is denied unless the spec names it', () => {
+  const p = { protectedPaths: ['db/migrations/**'] }
+  expect(denied(gate(edit('/w/db/migrations/2026_add.sql'), ctx('builder', p)))).toBe(true)
+  expect(gate(edit('/w/db/migrations/2026_add.sql'), ctx('builder', { ...p, specText: 'Add db/migrations/2026_add.sql' }))).toEqual({ allow: true })
+  expect(gate(edit('/w/src/a.php'), ctx('builder', p))).toEqual({ allow: true })
+})
+
+test('git push -f and git reset --hard are denied even with no role', () => {
+  expect(denied(gate(bash('git push -f'), ctx(undefined)))).toBe(true)
+  expect(denied(gate(bash('git push --force origin main'), ctx(undefined)))).toBe(true)
+  expect(denied(gate(bash('git reset --hard HEAD~1'), ctx(undefined)))).toBe(true)
+  expect(gate(bash('git status'), ctx(undefined))).toEqual({ allow: true })
+})
+
+// --- always rules ---
+
+test('forge MCP create/merge tools are denied, read tools allowed (no role too)', () => {
+  for (const tool of ['mcp__Gitlab__save_merge_request', 'mcp__gh__create_pull_request', 'mcp__Gitlab__accept_merge_request', 'mcp__x__merge_pull_request']) {
+    expect(denied(gate({ tool, input: {} }, ctx(undefined)))).toBe(true)
+  }
+  for (const tool of ['mcp__Gitlab__get_merge_request', 'mcp__Gitlab__list_merge_requests', 'mcp__gh__search_pull_requests']) {
+    expect(gate({ tool, input: {} }, ctx(undefined))).toEqual({ allow: true })
+  }
+})
+
+test('reading .git/config is denied', () => {
+  expect(denied(gate({ tool: 'Read', input: { file_path: '/w/.git/config' } }, ctx('builder')))).toBe(true)
+  expect(denied(gate(bash('cat .git/config'), ctx('builder')))).toBe(true)
+  expect(denied(gate({ tool: 'Read', input: { file_path: '/w/.git/config' } }, ctx(undefined)))).toBe(true)
+  expect(gate({ tool: 'Read', input: { file_path: '/w/src/a.php' } }, ctx('code-reviewer'))).toEqual({ allow: true })
+})
+
+// --- builder ---
+
+test('builder Bash: MR creation, remotes, hooks and forge writes are denied', () => {
+  for (const c of [
+    'gh pr create --fill', 'glab mr create -t x', 'git -C /w push', 'cd /w && git push',
+    'git config core.hooksPath .hooks', 'git config remote.origin.url https://x', 'git remote set-url origin x',
+    'cp evil .git/hooks/pre-commit', 'curl -X POST https://api.github.com/repos/o/r/pulls',
+    'curl --data "{}" https://gitlab.com/api/v4/projects/1/merge_requests', 'wget --post-data=x https://gitlab.example/api/v4/x',
+    'git config alias.p push', 'git -c alias.p=push p', 'git -c core.hooksPath=/tmp/h commit -m x', 'git --no-pager push origin HEAD',
+  ]) expect(denied(gate(bash(c), ctx('builder')))).toBe(true)
+})
+
+test('builder Bash: ordinary work is allowed', () => {
+  for (const c of ['composer test', 'git add -A && git commit -m "feat: x"', 'git status', 'curl -s https://example.com', 'git config user.name x', 'rm -rf build']) {
+    expect(gate(bash(c), ctx('builder'))).toEqual({ allow: true })
+  }
+})
+
+test('builder edits: relative paths, .. escapes, .git and .factory', () => {
+  expect(gate(edit('src/a.php'), ctx('builder'))).toEqual({ allow: true })
+  expect(gate({ tool: 'Write', input: { file_path: '/w/new.txt', content: 'x' } }, ctx('builder'))).toEqual({ allow: true })
+  expect(denied(gate(edit('/w/../etc/passwd'), ctx('builder')))).toBe(true)
+  expect(denied(gate(edit('../x'), ctx('builder')))).toBe(true)
+  expect(denied(gate(edit('/wx/a'), ctx('builder')))).toBe(true)
+  expect(denied(gate(edit('/w/.git/hooks/pre-push'), ctx('builder')))).toBe(true)
+  expect(denied(gate(edit('/w/.factory/spec.md'), ctx('builder')))).toBe(true)
+  expect(denied(gate({ tool: 'NotebookEdit', input: { notebook_path: '/tmp/n.ipynb' } }, ctx('builder')))).toBe(true)
+  expect(denied(gate(edit('/w/a'), ctx('builder', { worktree: undefined })))).toBe(true)
+  expect(denied(gate({ tool: 'Write', input: {} }, ctx('builder')))).toBe(true)
+})
+
+test('protected globs: * stays within a segment, ** crosses', () => {
+  const p = { protectedPaths: ['.gitlab-ci.yml', 'config/*.php'] }
+  expect(denied(gate(edit('/w/.gitlab-ci.yml'), ctx('builder', p)))).toBe(true)
+  expect(denied(gate(edit('/w/config/db.php'), ctx('builder', p)))).toBe(true)
+  expect(gate(edit('/w/config/sub/db.php'), ctx('builder', p))).toEqual({ allow: true })
+})
+
+// --- read-only roles ---
+
+test('every non-builder role is read-only for edits', () => {
+  for (const role of READ_ONLY) {
+    for (const tool of ['Edit', 'Write', 'NotebookEdit']) {
+      expect(denied(gate({ tool, input: { file_path: '/w/a', notebook_path: '/w/a' } }, ctx(role)))).toBe(true)
+    }
+  }
+})
+
+test('read-only roles may run allowlisted read commands', () => {
+  for (const c of [
+    'git diff main...HEAD', 'git log --oneline -5', 'git show HEAD:src/a.php', 'git status', 'git branch --show-current',
+    'git branch', 'cat src/a.php | head -20', 'grep -rn "a|b" src', 'rg -n "x > y" src', 'find . -name "*.php"',
+    'ls -la && pwd', 'wc -l src/a.php; echo done', 'git ls-files | sort | uniq', 'tree src', 'diff a b',
+  ]) {
+    for (const role of READ_ONLY) expect(gate(bash(c), ctx(role))).toEqual({ allow: true })
+  }
+})
+
+test('read-only roles may not run anything else', () => {
+  for (const c of [
+    'rm -rf src', 'mv a b', 'git commit -am x', 'git checkout main', 'git reset HEAD~1', 'git branch -D x', 'git branch new',
+    'echo x > a.txt', 'cat a >> b', 'ls 2>/dev/null', 'diff <(ls) b', 'echo $(rm a)', 'echo `rm a`', 'find . -delete',
+    'find . -exec rm {} \\;', 'ls | xargs rm', 'sudo ls', 'env ls', 'sh -c ls', 'bash -c ls', 'eval ls', 'touch a',
+    'composer test', 'X=1 ls', 'sort -o out in', 'git -c core.pager=sh log', 'git diff --output=x', '/bin/rm a', 'cat a\nrm a',
+    'rg --pre ./evil x', 'cd /tmp; ls',
+  ]) {
+    for (const role of READ_ONLY) {
+      const r = gate(bash(c), ctx(role))
+      expect(denied(r)).toBe(true)
+    }
+  }
+  expect((gate(bash('touch a'), ctx('approver')) as { deny: string }).deny).toContain('read-only')
+})
+
+test('child roles: mutating MCP tools are denied, read tools allowed', () => {
+  for (const role of ['builder', 'code-reviewer'] as Role[]) {
+    for (const tool of ['mcp__Gitlab_IronCloud__add_commit', 'mcp__Slack__slack_add_list_record', 'mcp__Gitlab_IronCloud__save_note']) {
+      expect(denied(gate({ tool, input: {} }, ctx(role)))).toBe(true)
+    }
+    for (const tool of ['mcp__Gitlab_IronCloud__get_work_item', 'mcp__Gitlab_IronCloud__list_commits', 'mcp__Gitlab_IronCloud__search']) {
+      expect(gate({ tool, input: {} }, ctx(role))).toEqual({ allow: true })
+    }
+  }
+  expect(denied(gate({ tool: 'Grep', input: { pattern: 'x', path: '/w/.git/config' } }, ctx('code-reviewer')))).toBe(true)
+})
+
+test('read-only child: spec file is not read at all', async ($, on) => {
+  let reads = 0
+  mock.env(on, { FACTORY_ROLE: 'code-reviewer', FACTORY_WORKTREE: '/w', FACTORY_SPEC_FILE: '/w/.factory/spec.md', FACTORY_PROTECTED: 'db/**' })
+  on('fs.exists', () => ({ value: true }))
+  on('fs.read', () => { reads++; return { deny: 'no reading' } })
+  on('tool.call', () => ({ result: 'ran' }))
+  expect((await $.tool.call({ tool: 'Bash', command: 'git diff' })).deny).toBeUndefined()
+  expect((await $.tool.call({ tool: 'Bash', command: 'rm -rf src' })).deny).toBeDefined()
+  expect(reads).toBe(0)
+})
+
+test('unknown tools pass; unknown role is treated as read-only', () => {
+  expect(gate({ tool: 'Glob', input: { pattern: '**/*.ts' } }, ctx('code-reviewer'))).toEqual({ allow: true })
+  expect(denied(gate(edit('/w/a'), ctx('janitor' as Role)))).toBe(true)
+})
+
+// --- wiring (kit) ---
+
+test('child session: hook denies git push', async ($, on) => {
+  mock.env(on, { FACTORY_ROLE: 'builder', FACTORY_WORKTREE: '/w', FACTORY_SPEC_FILE: '/w/.factory/spec.md', FACTORY_PROTECTED: 'db/migrations/**' })
+  on('fs.exists', () => ({ value: false }))
+  on('tool.call', () => ({ result: 'ran' }))
+  const r = await $.tool.call({ tool: 'Bash', command: 'git push' })
+  expect(r.deny).toBeDefined()
+  const ok = await $.tool.call({ tool: 'Bash', command: 'composer test' })
+  expect(ok.deny).toBeUndefined()
+})
+
+test('child session: protected path follows FACTORY_PROTECTED and the spec file', async ($, on) => {
+  mock.env(on, { FACTORY_ROLE: 'builder', FACTORY_WORKTREE: '/w', FACTORY_SPEC_FILE: '/w/.factory/spec.md', FACTORY_PROTECTED: 'db/migrations/**,ci/*' })
+  on('fs.exists', () => ({ value: true }))
+  on('fs.read', () => ({ value: 'touches db/migrations/2026_add.sql' }))
+  on('tool.call', () => ({ result: 'ran' }))
+  expect((await $.tool.call({ tool: 'Edit', file_path: '/w/db/migrations/2026_add.sql', old_string: 'a', new_string: 'b' })).deny).toBeUndefined()
+  expect((await $.tool.call({ tool: 'Edit', file_path: '/w/db/migrations/other.sql', old_string: 'a', new_string: 'b' })).deny).toBeDefined()
+  expect((await $.tool.call({ tool: 'Write', file_path: '/w/ci/x.yml', content: 'x' })).deny).toBeDefined()
+})
+
+test('child session: a gate that throws still denies', async ($, on) => {
+  mock.env(on, { FACTORY_ROLE: 'builder', FACTORY_WORKTREE: '/w', FACTORY_SPEC_FILE: '/w/.factory/spec.md', FACTORY_PROTECTED: 'db/**' })
+  on('fs.exists', () => ({ value: true }))
+  on('fs.read', () => ({ deny: 'no reading' }))
+  on('tool.call', () => ({ result: 'ran' }))
+  const r = await $.tool.call({ tool: 'Bash', command: 'composer test' })
+  expect(r.deny).toBe('factory gate failed; action blocked')
+})
+
+test('parent session: nothing is gated', async ($, on) => {
+  mock.env(on, {})
+  on('tool.call', () => ({ result: 'ran' }))
+  expect((await $.tool.call({ tool: 'Bash', command: 'git push' })).deny).toBeUndefined()
+  expect((await $.tool.call({ tool: 'Edit', file_path: '/etc/x', old_string: 'a', new_string: 'b' })).deny).toBeUndefined()
+})
