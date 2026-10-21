@@ -364,3 +364,21 @@ test('no webhook, no Slack post', { options: { repos: 'gitlab:g/p', workerId: 'w
   expect(r.text).toContain('awaiting-spec')
   expect(slack).toBe(0)
 })
+
+test('a rejecting Slack fetch does not fail the tick', { options: { repos: 'gitlab:g/p', workerId: 'w1', slackWebhook: HOOK } }, async ($, on) => {
+  const logs: string[] = []
+  mock.env(on, { GITLAB_TOKEN: 'x', HOME: '/home/u' })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('ui.log', (_, e) => { logs.push(JSON.stringify(e)); return { value: undefined } })
+  const gl = gitlab(on, 'build', (e) => {
+    if (e.url.startsWith('https://hooks.slack.com')) throw new Error('network down')
+    return undefined
+  })
+  gl.issue.labels = ['factory::build', 'factory::plan']
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  const r = await $.command.run({ command: 'factory', args: 'tick' })
+  expect(r.text).toContain('#4')
+  expect(logs.join('\n')).toContain('post failed')
+  expect(logs.join('\n')).not.toContain('SECRETXYZ')
+})

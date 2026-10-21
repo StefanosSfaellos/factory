@@ -33,7 +33,6 @@ type Engine = EngineInterface
 const DEFAULT_TICK_MINUTES = 10
 const DEFAULT_PARALLEL = 2
 const PANE = 'factory'
-const SLACK_TIMEOUT_MS = 10000
 
 const jobsAtom = atom({ plugin: 'software-factory', key: 'jobs' } as const, [])
 const loadedAtom = atom({ plugin: 'software-factory', key: 'loaded' } as const, false)
@@ -288,13 +287,7 @@ async function notifySlack($: Engine, st: State, r: TickResult, forges: Partial<
     }
     for (const ev of await slackEvents(r.advanced, info)) {
       try {
-        // No abort signal is known for $.http.fetch, so a slow webhook is abandoned by a $.clock timer.
-        let timer: { cancel: () => void } | undefined
-        const timeout = new Promise<never>((_, reject) => { timer = $.clock.after(SLACK_TIMEOUT_MS, () => reject(new Error('timed out'))) })
-        const res = await Promise.race([
-          $.http.fetch(st.webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: slackPayload(ev, st.secrets) }),
-          timeout,
-        ]).finally(() => timer?.cancel())
+        const res = await $.http.fetch(st.webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: slackPayload(ev, st.secrets) })
         if (!res.ok) $.ui.log(`factory slack: webhook answered ${res.status}`, { to: 'debug' })
       } catch (err) {
         $.ui.log(redact(`factory slack: post failed: ${err instanceof Error ? err.message : String(err)}`, st.secrets), { to: 'debug' })
