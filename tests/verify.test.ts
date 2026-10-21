@@ -8,12 +8,14 @@ const base = { cloneUrl: 'https://x:tok123@host/r.git', branch: 'b', scratchDir:
 
 function fake(h: (cmd: string) => { exitCode: number; stdout?: string; stderr?: string; timedOut?: boolean }) {
   const calls: string[][] = []
-  const run: RunFn = async (argv) => {
+  const opts: { cwd?: string; timeoutMs?: number }[] = []
+  const run: RunFn = async (argv, o) => {
     calls.push(argv)
+    opts.push(o)
     if (argv[0] === 'sh') { const r = h(argv[2]); return { stdout: '', stderr: '', ...r } }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
-  return { run, calls }
+  return { run, calls, opts }
 }
 
 test('passes on exit 0', async () => {
@@ -59,4 +61,25 @@ test('clone failure is passed:false and redacted', async () => {
   expect(r.passed).toBe(false)
   expect(r.report).toContain('passed=false')
   expect(r.report).not.toContain('tok123')
+})
+
+test('setup then test run in order with cwd and timeout', async () => {
+  const f = fake(() => ({ exitCode: 0 }))
+  await verify(f.run, base)
+  const sh = f.calls.map((c, i) => ({ c, o: f.opts[i] })).filter((x) => x.c[0] === 'sh')
+  expect(sh.map((x) => x.c)).toEqual([['sh', '-c', 'npm ci'], ['sh', '-c', 'npm test']])
+  for (const x of sh) expect(x.o).toEqual({ cwd: '/s', timeoutMs: 600000 })
+})
+test('blank test command fails without running', async () => {
+  const f = fake(() => ({ exitCode: 0 }))
+  const r = await verify(f.run, { ...base, cfg: { ...cfg, test: ' ' } as RepoConfig })
+  expect(r.passed).toBe(false)
+  expect(r.report).toContain('passed=false')
+  expect(f.calls.some((c) => c[0] === 'sh')).toBe(false)
+})
+test('setup passes, test times out', async () => {
+  const f = fake((c) => (c === 'npm test' ? { exitCode: -1, timedOut: true } : { exitCode: 0 }))
+  const r = await verify(f.run, base)
+  expect(r.passed).toBe(false)
+  expect(r.report).toContain('timed out after 10 min')
 })

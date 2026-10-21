@@ -13,7 +13,7 @@ export function branchName(ref: JobRef, title: string, prefix: string): string {
     .replace(/^-+/, '')
     .slice(0, 40)
     .replace(/-+$/, '')
-  return `${prefix}${ref.issue}-${slug}`
+  return `${prefix}${ref.issue}-${slug || 'issue'}`
 }
 
 export function workDir(root: string, ref: JobRef): string {
@@ -22,14 +22,15 @@ export function workDir(root: string, ref: JobRef): string {
 
 export async function ensureCheckout(
   run: RunFn,
-  opts: { dir: string; cloneUrl: string; branch: string; base: string },
+  opts: { dir: string; cloneUrl: string; branch: string; base: string; secrets?: string[] },
 ): Promise<void> {
   const { dir, cloneUrl, branch, base } = opts
+  const secrets = [...(opts.secrets ?? []), cloneUrl]
   const git = async (argv: string[]): Promise<{ exitCode: number }> => {
     const r = await run(argv, {})
     if (r.exitCode !== 0) {
       const detail = `${r.stderr}\n${r.stdout}`.trim()
-      throw new Error(redact(`git ${argv[1] === '-C' ? argv[3] : argv[1]} failed (exit ${r.exitCode}): ${detail}`, [cloneUrl]))
+      throw new Error(redact(`git ${argv[1] === '-C' ? argv[3] : argv[1]} failed (exit ${r.exitCode}): ${detail}`, secrets))
     }
     return r
   }

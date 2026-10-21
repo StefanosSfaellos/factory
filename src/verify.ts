@@ -27,7 +27,8 @@ export async function verify(
     return finish(false, `Command: git clone --depth 1 --branch ${branch}\nExit code: ${clone.exitCode}\n\n${tail(`${clone.stdout}\n${clone.stderr}`.trim(), 80)}`)
   }
 
-  const cmds = [cfg.setup, cfg.test].filter((c): c is string => !!c)
+  if (!cfg.test || !cfg.test.trim()) return finish(false, 'No test command configured (cfg.test is blank)')
+  const cmds = [cfg.setup, cfg.test].filter((c, i): c is string => (i === 1 ? true : !!c && !!c.trim()))
   for (let i = 0; i < cmds.length; i++) {
     const cmd = cmds[i]
     const r = await run(['sh', '-c', cmd], { cwd: scratchDir, timeoutMs: TIMEOUT_MS })
@@ -36,5 +37,5 @@ export async function verify(
     if (r.exitCode !== 0) return finish(false, `Command: ${cmd}\nExit code: ${r.exitCode}\n\n${out}`)
     if (i === cmds.length - 1) return finish(true, `Command: ${cmd}\nExit code: ${r.exitCode}\n\n${out}`)
   }
-  return finish(false, 'No test command configured')
+  return finish(false, 'unreachable')
 }

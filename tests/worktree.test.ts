@@ -48,3 +48,13 @@ test('errors never include the clone url', async () => {
   expect(msg.includes('tok123')).toBe(false)
   expect(msg.includes(o.cloneUrl)).toBe(false)
 })
+
+test('empty slug falls back to issue', () => {
+  expect(branchName(ref, '!!!', 'factory/')).toBe('factory/42-issue')
+})
+test('extra secrets redacted in checkout errors', async () => {
+  const f = fake(false, false, 'clone')
+  let msg = ''
+  try { await ensureCheckout(f.run, { ...o, secrets: ['host'] }) } catch (e) { msg = (e as Error).message }
+  expect(msg.includes('host')).toBe(false)
+})
