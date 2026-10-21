@@ -24,7 +24,7 @@ test('passes on exit 0', async () => {
   expect(r.passed).toBe(true)
   expect(r.report.split('\n')[0]).toBe('<!-- factory:test-report passed=true -->')
   expect(f.calls[0]).toEqual(['rm', '-rf', '/s'])
-  expect(f.calls[1]).toEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', 'clone', '--depth', '1', '--branch', 'b', base.cloneUrl, '/s'])
+  expect(f.calls[1]).toEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', 'clone', '--depth', '1', '--branch', 'b', base.cloneUrl, '/s'])
 })
 test('fails on exit 1 with log tail', async () => {
   const lines = Array.from({ length: 100 }, (_, i) => 'line' + i).join('\n')
@@ -76,7 +76,7 @@ test('blank test command fails without running', async () => {
   expect(r.passed).toBe(false)
   expect(r.report).toContain('passed=false')
   expect(f.calls.some((c) => c[0] === 'sh')).toBe(false)
-  expect(f.calls.some((c) => c[0] === 'git' && c.includes('clone'))).toBe(false)
+  expect(f.calls.some((c) => c.includes('git') && c.includes('clone'))).toBe(false)
 })
 test('setup passes, test times out', async () => {
   const f = fake((c) => (c === 'npm test' ? { exitCode: -1, timedOut: true } : { exitCode: 0 }))
@@ -89,7 +89,7 @@ test('clone is followed immediately by set-url to the tokenless url', async () =
   const f = fake(() => ({ exitCode: 0 }))
   await verify(f.run, base)
   const i = f.calls.findIndex((c) => c.includes('clone'))
-  expect(f.calls[i + 1]).toEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/s', 'remote', 'set-url', 'origin', 'https://host/r.git'])
+  expect(f.calls[i + 1]).toEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/s', 'remote', 'set-url', 'origin', 'https://host/r.git'])
 })
 
 test('report records the tested commit sha', async () => {

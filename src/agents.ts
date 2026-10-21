@@ -24,7 +24,27 @@ export type ChildOpts = {
   forgeHosts?: string[]
 }
 
-const READ_ONLY: Role[] = ['code-reviewer', 'security-reviewer', 'ux-reviewer', 'approver']
+// R7/R19: every role but the builder is read-only.
+const READ_ONLY: Role[] = ['spec-writer', 'designer', 'planner', 'code-reviewer', 'security-reviewer', 'ux-reviewer', 'approver']
+
+/**
+ * R23: Claude Code's Bash sandbox for every child, in the shape the Claude Code docs
+ * give (code.claude.com/docs/en/sandboxing): `sandbox.enabled`, no unsandboxed retry,
+ * and the forge tokens denied to sandboxed commands. Its default write scope is the
+ * working directory (the job's agent dir) and the per-user temp directory.
+ */
+export const CHILD_SETTINGS = JSON.stringify({
+  sandbox: {
+    enabled: true,
+    allowUnsandboxedCommands: false,
+    credentials: {
+      envVars: [
+        { name: 'GITHUB_TOKEN', mode: 'deny' },
+        { name: 'GITLAB_TOKEN', mode: 'deny' },
+      ],
+    },
+  },
+})
 const PROGRESS_MAX = 120
 
 export function childArgv(o: ChildOpts): string[] {
@@ -42,6 +62,7 @@ export function childArgv(o: ChildOpts): string[] {
     '--agent', `software-factory:${o.role}`,
     '--model', modelFor(o.role, o.cfg),
     '--permission-mode', 'acceptEdits',
+    '--settings', CHILD_SETTINGS,
     '--output-format', 'stream-json',
     '--verbose',
   ]

@@ -24,7 +24,29 @@ test('childArgv: env prefix, claude invocation and namespaced agent', () => {
   expect(after(a, '--output-format')).toBe('stream-json')
   expect(a).toContain('--verbose')
   expect(a).not.toContain('--allowedTools')
-  expect(a).not.toContain('--disallowedTools')
+  const i = a.indexOf('--disallowedTools')
+  expect(a.slice(i + 1, i + 4)).toEqual(['Edit', 'Write', 'NotebookEdit'])
+})
+
+test('childArgv: every role but the builder gets --disallowedTools Edit Write NotebookEdit', () => {
+  for (const role of ['spec-writer', 'designer', 'planner', 'code-reviewer', 'security-reviewer', 'ux-reviewer', 'approver'] as const) {
+    const a = childArgv({ ...base, role })
+    const i = a.indexOf('--disallowedTools')
+    expect(a.slice(i + 1, i + 4)).toEqual(['Edit', 'Write', 'NotebookEdit'])
+  }
+})
+
+test('childArgv: R23 Bash sandbox via --settings in the documented shape', () => {
+  for (const role of ['builder', 'planner'] as const) {
+    const s = JSON.parse(after(childArgv({ ...base, role }), '--settings')!)
+    expect(s).toEqual({
+      sandbox: {
+        enabled: true,
+        allowUnsandboxedCommands: false,
+        credentials: { envVars: [{ name: 'GITHUB_TOKEN', mode: 'deny' }, { name: 'GITLAB_TOKEN', mode: 'deny' }] },
+      },
+    })
+  }
 })
 
 test('childArgv: passes protectedPaths to the child gate as FACTORY_PROTECTED', () => {

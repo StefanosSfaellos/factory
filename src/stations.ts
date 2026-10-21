@@ -7,7 +7,7 @@ import { redact } from './redact'
 import type { Comment, Job, JobRef, Station, Verdict } from './types'
 import { verify } from './verify'
 import { runAgent, type SpawnFn } from './agents'
-import { branchName, ensureCheckout, gitArgv, gitNoDir, modDir, prepareWorktree, workDir, type RunFn } from './worktree'
+import { branchName, ensureCheckout, gitArgv, gitNoDir, workDir, type RunFn } from './worktree'
 
 // Station runner: `advance` performs one station step for one job.
 // State-write order: every comment is posted first, the label changes last.
@@ -35,6 +35,9 @@ export type Deps = {
   /** Writes a text file (used for `<worktree>/.factory/spec.md` and `.git/info/exclude`). */
   writeFile: (path: string, text: string) => Promise<void>
 }
+
+/** A station refusal that retrying cannot fix: blocks at once. */
+class Refusal extends Error {}
 
 export type AdvanceResult = { from: Station; to: Station; needsHuman: boolean }
 
@@ -178,31 +181,81 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
     requiredReviewers: cfg.reviewers.map((r) => REVIEWER_ROLE[r]),
   }
 
-  // `dir` is the agents' working directory; `mod` is the mod's own clone (R20). The
-  // mod runs commit, push and token-bearing fetch only in `mod`, never in `dir`,
-  // whose .git/config the builder controls.
+  // `dir` is the agents' working directory: a fresh clone from the forge for every
+  // station (R21), so nothing an earlier agent left in it survives. Every
+  // token-bearing git operation after an agent ran happens in a fresh bare repo
+  // the mod creates for that moment and deletes afterwards (withBare), never in a
+  // directory an agent could have written to.
   const dir = workDir(deps.workRoot, ref)
-  const mod = modDir(dir)
   const branch = branchName(ref, job.title, cfg.branchPrefix)
   const jobId = `${ref.forge}:${ref.project}#${ref.issue}`
   const art = (kind: string) => textOf(findLatest(job.comments, kind))
 
-  /** Updates the mod clone from the forge and gives the agents a fresh copy of it. */
+  /** A fresh agent directory: removed, cloned from the forge, origin reset to the public URL. */
   const checkout = async (): Promise<string> => {
     const base = await forge.defaultBranch(ref.project)
-    await ensureCheckout(deps.run, { dir: mod, cloneUrl, publicUrl, branch, base, secrets: deps.secrets })
-    await prepareWorktree(deps.run, { mod, dir, publicUrl })
+    await runOk(['rm', '-rf', dir], 'removing the old agent directory')
+    await ensureCheckout(deps.run, { dir, cloneUrl, publicUrl, branch, base, secrets: deps.secrets })
     return base
   }
   const shaOf = (out: string) => { const m = /^([0-9a-f]{7,64})\b/.exec(out.trim()); return m ? m[1] : undefined }
-  const headSha = async () => shaOf((await deps.run(gitArgv(mod, 'rev-parse', 'HEAD'), {})).stdout)
-  /** Writes the branch diff and log, computed in the mod clone, for the read-only reviewers and approver (R19). */
-  const writeEvidence = async (baseBranch: string, head: string) => {
-    const diff = await runOk(gitArgv(mod, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', `origin/${baseBranch}...${head}`), 'git diff')
-    const log = await runOk(gitArgv(mod, 'log', '--no-color', '--no-decorate', `origin/${baseBranch}..${head}`), 'git log')
+  /**
+   * Runs `fn` with a fresh bare repo under workRoot (R21), removed afterwards even on failure.
+   * Nothing but the mod has ever written to it, so its config is git's defaults.
+   */
+  const withBare = async <T>(fn: (bare: string) => Promise<T>): Promise<T> => {
+    const bytes = new Uint8Array(6)
+    crypto.getRandomValues(bytes)
+    const bare = `${dir}.bare-${[...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')}`
+    try {
+      await runOk(gitNoDir('init', '--bare', '--quiet', bare), 'git init --bare')
+      return await fn(bare)
+    } finally {
+      await deps.run(['rm', '-rf', bare], {})
+    }
+  }
+  /** Fetches the job branch (as refs/factory/build) and the base from the forge into `bare`. */
+  const fetchForge = async (bare: string, baseBranch: string) => {
+    await runOk(gitArgv(bare, 'fetch', '--no-tags', cloneUrl, `+refs/heads/${branch}:refs/factory/build`, `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`), 'git fetch')
+  }
+  const buildSha = async (bare: string) => shaOf((await runOk(gitArgv(bare, 'rev-parse', '--verify', 'refs/factory/build^{commit}'), 'git rev-parse')).stdout)
+  /** R22: the factory owns `.factory/`; a branch that tracks it is refused. */
+  const refuseTrackedFactory = async (bare: string) => {
+    const tracked = (await runOk(gitArgv(bare, 'ls-tree', '-r', '--name-only', 'refs/factory/build', '--', '.factory'), 'git ls-tree')).stdout.trim()
+    if (tracked !== '') throw new Refusal(`branch tracks .factory/ (${tracked.split('\n').slice(0, 5).join(', ')}); the factory owns that directory. Remove it from the branch, then relabel the issue.`)
+  }
+  /**
+   * R22: before the mod writes into `<dir>/.factory`, the directory is removed and
+   * re-created, so no symlink (committed or planted) can redirect the write. The
+   * agent directory is a fresh clone here, so `ls-files` reads only forge content.
+   */
+  const freshFactoryDir = async () => {
+    const tracked = (await runOk(gitArgv(dir, 'ls-files', '--', '.factory'), 'git ls-files')).stdout.trim()
+    if (tracked !== '') throw new Refusal(`branch tracks .factory/ (${tracked.split('\n').slice(0, 5).join(', ')}); the factory owns that directory. Remove it from the branch, then relabel the issue.`)
+    await runOk(['rm', '-rf', `${dir}/.factory`], 'rm .factory')
     await runOk(['mkdir', '-p', `${dir}/.factory`], 'mkdir .factory')
-    await deps.writeFile(`${dir}/.factory/branch.diff`, diff.stdout)
-    await deps.writeFile(`${dir}/.factory/branch.log`, log.stdout)
+  }
+  /**
+   * Fresh agent dir plus the branch head, diff and log computed in a fresh bare repo
+   * from the forge, written to `<dir>/.factory/` for the read-only reviewers and approver (R19).
+   */
+  const prepareReview = async (): Promise<{ baseBranch: string; sha: string | undefined }> => {
+    const baseBranch = await checkout()
+    const ev = await withBare(async (bare) => {
+      await fetchForge(bare, baseBranch)
+      await refuseTrackedFactory(bare)
+      const sha = await buildSha(bare)
+      if (!sha) return { sha }
+      const diff = await runOk(gitArgv(bare, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', `refs/remotes/origin/${baseBranch}...${sha}`), 'git diff')
+      const log = await runOk(gitArgv(bare, 'log', '--no-color', '--no-decorate', `refs/remotes/origin/${baseBranch}..${sha}`), 'git log')
+      return { sha, diff: diff.stdout, log: log.stdout }
+    })
+    await freshFactoryDir()
+    if (ev.sha) {
+      await deps.writeFile(`${dir}/.factory/branch.diff`, ev.diff ?? '')
+      await deps.writeFile(`${dir}/.factory/branch.log`, ev.log ?? '')
+    }
+    return { baseBranch, sha: ev.sha }
   }
   const remoteSha = async () => shaOf((await deps.run(gitNoDir('ls-remote', cloneUrl, `refs/heads/${branch}`), {})).stdout)
   const agent = async (role: Role, artifacts: Record<string, string>): Promise<string> => {
@@ -242,7 +295,7 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
           if (reportFailed && at(report) > failed.at) a.report = textOf(report) ?? ''
           else if (failed.verdicts.length > 0) a.findings = formatVerdicts(failed.verdicts)
         }
-        await runOk(['mkdir', '-p', `${dir}/.factory`], 'mkdir .factory')
+        await freshFactoryDir()
         await deps.writeFile(`${dir}/.factory/spec.md`, base.spec)
         const excludePath = `${dir}/.git/info/exclude`
         const existing = (await deps.run(['cat', excludePath], {})).stdout
@@ -252,23 +305,30 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
         const out = await agent('builder', a)
         const lines = out.split('\n').map((l) => l.trim()).filter((l) => l !== '')
         if (lines[lines.length - 1] !== 'BUILD-DONE') throw new Error(`builder did not finish (no BUILD-DONE): ${lines.slice(-5).join(' / ')}`)
-        // Bring the builder's commits into the mod clone; everything after happens there.
-        await runOk(gitArgv(mod, 'fetch', '--no-tags', dir, '+HEAD:refs/factory/build'), 'git fetch from the builder worktree')
-        await runOk(gitArgv(mod, 'checkout', '-B', branch, 'refs/factory/build'), 'git checkout of the built branch')
-        // After failed review findings the branch must move; after a failed test report an
-        // unchanged branch is fine (verify runs fresh; each failed report counts as a fix loop).
+        // The builder's commits go to the forge only through a fresh bare repo (R21): the
+        // builder controls its own .git, so nothing token-bearing runs there.
         const lastFail = newest([...markersOf(job, 'test-report').filter((x) => x.attrs.passed === 'false'), ...markersOf(job, 'verdict').filter((x) => x.attrs.pass === 'false')])
-        if (ctx.fixLoops > 0 && lastFail?.attrs.sha) {
-          const sha = await headSha()
-          if (lastFail.attrs.sha === sha) {
+        await withBare(async (bare) => {
+          await runOk(gitArgv(bare, 'fetch', '--no-tags', dir, '+HEAD:refs/factory/build'), 'git fetch from the builder directory')
+          await refuseTrackedFactory(bare)
+          let sha = await buildSha(bare)
+          if (!sha) throw new Error('could not read the built commit')
+          // After failed review findings the branch must move; after a failed test report an
+          // unchanged branch is fine (verify runs fresh; each failed report counts as a fix loop).
+          if (ctx.fixLoops > 0 && lastFail?.attrs.sha === sha) {
             if (parseMarker(lastFail.c.body)?.kind === 'verdict') throw new Error(`builder made no new commits since the failed review (head ${sha})`)
             // Unchanged code after a failed test run (e.g. a flaky test): an empty commit gives the
-            // branch a new head so verify runs fresh instead of replaying the cached report.
-            await runOk(gitArgv(mod, '-c', 'user.name=software-factory', '-c', 'user.email=software-factory@users.noreply',
-              'commit', '--allow-empty', '-m', 'chore: re-verify after failed test run'), 'git commit --allow-empty')
+            // branch a new head so verify runs fresh. commit-tree needs no checkout (no filters run).
+            const tree = shaOf((await runOk(gitArgv(bare, 'rev-parse', `${sha}^{tree}`), 'git rev-parse tree')).stdout)
+            if (!tree) throw new Error('could not read the built tree')
+            const made = await runOk(gitArgv(bare, '-c', 'user.name=software-factory', '-c', 'user.email=software-factory@users.noreply',
+              'commit-tree', tree, '-p', sha, '-m', 'chore: re-verify after failed test run'), 'git commit-tree')
+            sha = shaOf(made.stdout)
+            if (!sha) throw new Error('git commit-tree printed no commit')
+            await runOk(gitArgv(bare, 'update-ref', 'refs/factory/build', sha), 'git update-ref')
           }
-        }
-        await runOk(gitArgv(mod, 'push', cloneUrl, `HEAD:refs/heads/${branch}`), 'git push')
+          await runOk(gitArgv(bare, 'push', cloneUrl, `refs/factory/build:refs/heads/${branch}`), 'git push')
+        })
         return { posts: [], event: { kind: 'build-done' } }
       }
       case 'verify': {
@@ -276,10 +336,8 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
         return { posts: [r.report], event: { kind: 'verify', passed: r.passed } }
       }
       case 'review': {
-        const baseBranch = await checkout()
-        const sha = await headSha()
+        const { baseBranch, sha } = await prepareReview()
         if (!sha) throw new Error('could not read the branch head')
-        await writeEvidence(baseBranch, sha)
         const a = { ...base, report: art('test-report') ?? '', base: baseBranch }
         const settled = await Promise.allSettled(ctx.requiredReviewers.map(async (role): Promise<Verdict> => {
           const out = await agent(role, a)
@@ -351,12 +409,7 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
       const v = toVerdict(rej)
       return settle({ posts: [], event: { kind: 'verdicts', verdicts: [v] }, failed: [v], round: Number(rej.attrs.round) })
     }
-    const prep = await attempt(async () => {
-      const baseBranch = await checkout()
-      const sha = await headSha()
-      if (sha) await writeEvidence(baseBranch, sha)
-      return sha
-    })
+    const prep = await attempt(async () => (await prepareReview()).sha)
     if (!prep.ok) return prep.blocked
     gateSha = prep.value
     const gate = approveGate(job, ctx.requiredReviewers, ctx.fixLoops, gateSha)
@@ -385,6 +438,10 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
     try {
       return { ok: true, value: await fn() }
     } catch (first) {
+      if (first instanceof Refusal) {
+        const to = next(from, { kind: 'error', message: first.message, retried: true }, ctx).station
+        return { ok: false, blocked: await commit(from, to, [`${marker('blocked', { station: from })}\n${clean(first.message)}`]) }
+      }
       try {
         return { ok: true, value: await fn() }
       } catch (second) {

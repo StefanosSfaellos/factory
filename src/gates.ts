@@ -43,11 +43,20 @@ export function isShellTool(call: GateCall): boolean {
   return SHELL_TOOLS.includes(call.tool) || typeof call.input.command === 'string'
 }
 
+const READ_PATH_TOOLS = ['Read', 'Grep', 'Glob', 'LS']
+
 export function gate(call: GateCall, ctx: GateCtx): GateResult {
   const always = alwaysRules(call)
   if (always) return always
   if (ctx.role === undefined) return ALLOW
   const tool = call.tool
+
+  // R23: every child reads only inside its worktree, and never /proc (another
+  // process's environ would hold the parent's forge token).
+  if (READ_PATH_TOOLS.includes(tool)) {
+    const why = outsideWorktree(call, ctx)
+    if (why) return deny(why)
+  }
 
   if (ctx.role !== 'builder') {
     if (READ_ONLY_TOOLS.includes(tool) && !isShellTool(call)) return ALLOW
@@ -139,6 +148,11 @@ const FORGE_CLIS = new Set(['gh', 'glab', 'hub', 'lab'])
 const HTTP_CLIS = new Set(['curl', 'wget', 'http', 'https', 'xh'])
 
 function builderShell(cmd: string, ctx: GateCtx): GateResult {
+  // R23: /proc/<pid>/environ of the parent mod process holds the forge token.
+  const f = flatten(cmd)
+  if (/\/proc\//.test(f) || /\/proc$/.test(f) || /environ/.test(f) || /(^|[\s;|&(])(cd|pushd)\s+\/proc\b/.test(f)) {
+    return deny('reading /proc or process environments is not allowed.')
+  }
   if (touches(cmd, GIT_HOOKS_PATH)) return deny('touching .git/hooks is not allowed.')
   if (/\b(core\.hookspath|insteadof|pushurl|textconv|core\.fsmonitor|core\.sshcommand|core\.pager|diff\.external)\b/.test(flatten(cmd))) {
     return deny('setting git hooks, URL rewrites, pagers, diff/textconv drivers or ssh commands is not allowed.')
@@ -150,6 +164,8 @@ function builderShell(cmd: string, ctx: GateCtx): GateResult {
     if (prog === 'git') {
       const why = builderGit(words)
       if (why) return deny(why)
+    } else if (prog === 'ps' && words.slice(1).some((w) => !w.startsWith('-') && /e/.test(w))) {
+      return deny('ps with BSD `e` (process environments) is not allowed.')
     } else if (FORGE_CLIS.has(prog)) {
       return deny(`${prog} is not available to the builder; the factory talks to the forge.`)
     } else if (HTTP_CLIS.has(prog) && httpWrite(words) && mentionsForge(words, ctx)) {
@@ -277,6 +293,25 @@ function mentionsForge(words: string[], ctx: GateCtx): boolean {
     const host = /^(?:[a-z][a-z0-9+.-]*:\/\/)?(?:[^@/]*@)?([^/:?#]+)/.exec(l)?.[1] ?? ''
     return hosts.some((h) => host === h || host.endsWith(`.${h}`))
   })
+}
+
+/** R23: Read/Grep/Glob/LS paths resolve inside the worktree (relative paths against it). */
+function outsideWorktree(call: GateCall, ctx: GateCtx): string | undefined {
+  if (!ctx.worktree || !ctx.worktree.startsWith('/')) return 'no job worktree is known; reads are not allowed.'
+  const wt = normalise(ctx.worktree).toLowerCase()
+  const raws = pathsOf(call.input)
+  for (const raw of raws) {
+    if (raw.startsWith('~')) return `${raw} is outside the job worktree.`
+    const abs = normalise(raw.startsWith('/') ? raw : `${ctx.worktree}/${raw}`).toLowerCase()
+    if (abs === '/proc' || abs.startsWith('/proc/')) return 'reading /proc is not allowed.'
+    if (abs !== wt && !abs.startsWith(wt === '/' ? '/' : `${wt}/`)) return `${raw} is outside the job worktree ${ctx.worktree}; read only files inside it.`
+  }
+  // A glob pattern that climbs out (`../**`, `/etc/*`) is outside too.
+  const pattern = call.input.pattern
+  if (call.tool === 'Glob' && typeof pattern === 'string') {
+    if (pattern.startsWith('/') || pattern.startsWith('~') || pattern.split('/').includes('..')) return `glob ${pattern} reaches outside the job worktree.`
+  }
+  return undefined
 }
 
 // ---------- builder edits ----------

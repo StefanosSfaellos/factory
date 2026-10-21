@@ -35,6 +35,7 @@ function setup(station: string, comments: Comment[] = [], opts: {
   head?: string
   openMR?: string
   commentFailures?: number
+  trackedFactory?: string
 } = {}) {
   const state: Job & { head: string } = {
     head: opts.head ?? 'aaaaaaa',
@@ -96,10 +97,14 @@ function setup(station: string, comments: Comment[] = [], opts: {
   const runs: string[][] = []
   const run: RunFn = async (argv) => {
     runs.push(argv)
-    if (argv.includes('commit') && argv.includes('--allow-empty')) state.head = 'ccccccc'
+    // the agent dir was just removed, so ensureCheckout always clones afresh
+    if (argv[0] === 'test' && argv[1] === '-d') return { exitCode: 1, stdout: '', stderr: '' }
+    if (argv.includes('commit-tree')) { state.head = 'ccccccc'; return { exitCode: 0, stdout: 'ccccccc\n', stderr: '' } }
     if (argv[0] === 'sh') return { exitCode: opts.verifyExit ?? 0, stdout: `ran tests with ${SECRET}\n12 passed`, stderr: '' }
     if (argv.includes('push') && opts.pushStderr) return { exitCode: 128, stdout: '', stderr: opts.pushStderr }
-    if (argv.includes('rev-parse') && argv.at(-1) === 'HEAD') return { exitCode: 0, stdout: `${state.head}\n`, stderr: '' }
+    if ((argv.includes('ls-tree') || argv.includes('ls-files')) && opts.trackedFactory) return { exitCode: 0, stdout: `${opts.trackedFactory}\n`, stderr: '' }
+    if (argv.includes('rev-parse') && argv.at(-1)!.endsWith('^{tree}')) return { exitCode: 0, stdout: 'eeeeeee\n', stderr: '' }
+    if (argv.includes('rev-parse') && (argv.at(-1) === 'HEAD' || argv.at(-1) === 'refs/factory/build^{commit}')) return { exitCode: 0, stdout: `${state.head}\n`, stderr: '' }
     if (argv.includes('rev-parse')) return { exitCode: 1, stdout: '', stderr: '' }
     if (argv.includes('ls-remote')) return { exitCode: 0, stdout: `${state.head}\trefs/heads/x\n`, stderr: '' }
     return { exitCode: 0, stdout: '', stderr: '' }
@@ -196,8 +201,10 @@ test('build writes spec file, excludes .factory/, requires BUILD-DONE and pushes
   expect(s.files['/work/gitlab/g__p/7/.factory/spec.md']).toBe('## Goal\nRound VAT.')
   expect(s.files['/work/gitlab/g__p/7/.git/info/exclude']).toContain('.factory/')
   expect(s.runs).toContainEqual(['mkdir', '-p', '/work/gitlab/g__p/7/.factory'])
-  expect(s.runs).toContainEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/work/gitlab/g__p/7.mod', 'push', `https://oauth2:${SECRET}@host/g/p.git`, 'HEAD:refs/heads/factory/7-add-vat-rounding'])
-  expect(s.runs).toContainEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/work/gitlab/g__p/7', 'remote', 'set-url', 'origin', 'https://host/g/p.git'])
+  const push = s.runs.find((a) => a.includes('push'))!
+  expect(push.slice(-2)).toEqual([`https://oauth2:${SECRET}@host/g/p.git`, 'refs/factory/build:refs/heads/factory/7-add-vat-rounding'])
+  expect(push[push.indexOf('-C') + 1]).toMatch(/^\/work\/gitlab\/g__p\/7\.bare-[0-9a-f]{12}$/)
+  expect(s.runs).toContainEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/work/gitlab/g__p/7', 'remote', 'set-url', 'origin', 'https://host/g/p.git'])
   expect(s.log).toEqual(['label:verify'])
 })
 
@@ -484,7 +491,8 @@ test('build after a failed test report with no new commits makes an empty commit
   const r = await advance(ref, s.deps)
   expect(r.to).toBe('verify')
   expect(s.prompts.builder[0]).toContain('<<<BEGIN FAILED TEST REPORT>>>')
-  expect(s.runs.some((a) => a.includes('commit') && a.includes('--allow-empty'))).toBe(true)
+  expect(s.runs.some((a) => a.includes('commit-tree') && a.includes('eeeeeee') && a.includes('aaaaaaa'))).toBe(true)
+  expect(s.runs.some((a) => a.includes('update-ref') && a.at(-1) === 'ccccccc')).toBe(true)
   expect(s.runs.some((a) => a.includes('push'))).toBe(true)
 })
 
@@ -580,60 +588,120 @@ test('push and empty re-verify commit run git with hooks disabled', async () => 
   const s = setup('build', [...dossier(), c('t', '<!-- factory:test-report passed=false sha=aaaaaaa -->\nfail', 5)], { agents: { builder: 'nothing\nBUILD-DONE' } })
   await advance(ref, s.deps)
   const push = s.runs.find((a) => a.includes('push'))!
-  const empty = s.runs.find((a) => a.includes('--allow-empty'))!
+  const empty = s.runs.find((a) => a.includes('commit-tree'))!
   for (const argv of [push, empty]) {
     expect(argv).toContain('core.hooksPath=/dev/null')
     expect(argv).toContain('core.fsmonitor=false')
   }
-  for (const argv of s.runs.filter((a) => a[0] === 'git')) expect(argv).toContain('core.hooksPath=/dev/null')
-})
-
-// ---- Task 10 fix round 1: R20 (mod clone) ----
-const WT = '/work/gitlab/g__p/7'
-const MOD = '/work/gitlab/g__p/7.mod'
-const dirOf = (argv: string[]) => { const i = argv.indexOf('-C'); return i < 0 ? undefined : argv[i + 1] }
-
-test('R20: no push, commit or token fetch ever runs in the builder worktree; push runs in the mod clone', async () => {
-  const s = setup('build', [...dossier(), c('t', '<!-- factory:test-report passed=false sha=aaaaaaa -->\nfail', 5)], { agents: { builder: 'nothing\nBUILD-DONE' } })
-  await advance(ref, s.deps)
-  const git = s.runs.filter((a) => a[0] === 'git')
-  for (const argv of git) {
-    if (argv.includes('push') || argv.includes('commit') || argv.some((w) => w.includes(SECRET))) expect(dirOf(argv)).not.toBe(WT)
+  for (const argv of s.runs.filter((a) => a.includes('git'))) {
+    expect(argv).toContain('core.hooksPath=/dev/null')
+    expect(argv.slice(0, 3)).toEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1'])
   }
-  expect(dirOf(git.find((a) => a.includes('push'))!)).toBe(MOD)
-  expect(dirOf(git.find((a) => a.includes('--allow-empty'))!)).toBe(MOD)
-  // the builder's commits come into the mod clone by a local, tokenless fetch, then are checked out there
-  const fetch = git.findIndex((a) => a.join(' ').includes(`fetch --no-tags ${WT} +HEAD:refs/factory/build`))
-  expect(dirOf(git[fetch])).toBe(MOD)
-  expect(git[fetch + 1]).toEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', MOD, 'checkout', '-B', 'factory/7-add-vat-rounding', 'refs/factory/build'])
-  expect(git.findIndex((a) => a.includes('push'))).toBeGreaterThan(fetch)
-  // the only git in the worktree is set-url on a fresh copy of the mod clone
-  for (const argv of git.filter((a) => dirOf(a) === WT)) expect(argv.slice(-4)).toEqual(['remote', 'set-url', 'origin', 'https://host/g/p.git'])
-  expect(s.runs).toContainEqual(['rm', '-rf', WT])
-  expect(s.runs).toContainEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', 'clone', '--no-hardlinks', '--quiet', MOD, WT])
 })
 
-test('R20/R19: review writes branch.diff and branch.log, computed in the mod clone, into the worktree', async () => {
+// ---- Task 10 fix round 2: R21 (fresh bare repos), R22 (.factory) ----
+const WT = '/work/gitlab/g__p/7'
+const BARE = /^\/work\/gitlab\/g__p\/7\.bare-[0-9a-f]{12}$/
+const dirOf = (argv: string[]) => { const i = argv.indexOf('-C'); return i < 0 ? undefined : argv[i + 1] }
+const gitRuns = (runs: string[][]) => runs.filter((a) => a.includes('git'))
+
+test('R21: push and commit-tree run in a fresh bare repo, never the agent dir or a .mod dir; the bare repo is removed', async () => {
+  const s = setup('build', [...dossier(), c('t', '<!-- factory:test-report passed=false sha=aaaaaaa -->\nfail', 5)], { agents: { builder: 'nothing\nBUILD-DONE' } })
+  expect((await advance(ref, s.deps)).to).toBe('verify')
+  const git = gitRuns(s.runs)
+  for (const argv of git) {
+    expect(argv.some((w) => w.endsWith('.mod'))).toBe(false)
+    if (argv.includes('push') || argv.includes('commit-tree') || argv.includes('commit')) expect(dirOf(argv)).toMatch(BARE)
+  }
+  const push = git.find((a) => a.includes('push'))!
+  const ct = git.find((a) => a.includes('commit-tree'))!
+  expect(dirOf(push)).toMatch(BARE)
+  expect(dirOf(ct)).toBe(dirOf(push))
+  const bare = dirOf(push)!
+  const init = s.runs.findIndex((a) => a.includes('init') && a.includes(bare))
+  expect(s.runs[init]).toEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', 'init', '--bare', '--quiet', bare])
+  expect(s.runs).toContainEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', bare, 'fetch', '--no-tags', WT, '+HEAD:refs/factory/build'])
+  const removed = s.runs.findIndex((a) => a[0] === 'rm' && a.at(-1) === bare)
+  expect(removed).toBeGreaterThan(s.runs.indexOf(push))
+  // no checkout ever runs in the bare repo (no smudge filters)
+  expect(git.some((a) => dirOf(a) === bare && a.includes('checkout'))).toBe(false)
+  // the only git run in the agent dir after the builder: none (set-url/fetch/checkout precede it)
+  const spawnAt = s.runs.findIndex((a) => a.includes('fetch') && a.includes('+HEAD:refs/factory/build'))
+  expect(s.runs.slice(spawnAt).some((a) => a.includes('git') && dirOf(a) === WT)).toBe(false)
+})
+
+test('R21: the bare repo is removed even when the push fails', async () => {
+  const s = setup('build', dossier(), { agents: { builder: 'ok\nBUILD-DONE' }, pushStderr: 'denied' })
+  expect((await advance(ref, s.deps)).to).toBe('blocked')
+  const bares = [...new Set(gitRuns(s.runs).map(dirOf).filter((d): d is string => !!d && BARE.test(d)))]
+  expect(bares.length).toBeGreaterThan(0)
+  for (const b of bares) expect(s.runs).toContainEqual(['rm', '-rf', b])
+})
+
+test('R21: agent dirs are fresh forge clones with a public origin, not copies of a mod clone', async () => {
+  const s = setup('design', [c('a', SPEC, 1)], { agents: { designer: 'N/A — no design impact' } })
+  await advance(ref, s.deps)
+  const rm = s.runs.findIndex((a) => a[0] === 'rm' && a.at(-1) === WT)
+  const clone = s.runs.findIndex((a) => a.includes('clone'))
+  expect(rm).toBeGreaterThan(-1)
+  expect(clone).toBeGreaterThan(rm)
+  expect(s.runs[clone].slice(-2)).toEqual([`https://oauth2:${SECRET}@host/g/p.git`, WT])
+  expect(s.runs[clone + 1].slice(-4)).toEqual(['remote', 'set-url', 'origin', 'https://host/g/p.git'])
+})
+
+test('R21/R19: review computes head, diff and log in a fresh bare repo and writes them into the agent dir', async () => {
   const s = setup('review', [...dossier(), c('t', REPORT_OK, 5)], {
     agents: { 'code-reviewer': 'VERDICT: pass\n- none', 'security-reviewer': 'VERDICT: pass\n- none' },
   })
-  await advance(ref, s.deps)
+  expect((await advance(ref, s.deps)).to).toBe('approve')
   expect(s.files[`${WT}/.factory/branch.diff`]).toBeDefined()
   expect(s.files[`${WT}/.factory/branch.log`]).toBeDefined()
-  expect(s.runs).toContainEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', MOD, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', 'origin/main...aaaaaaa'])
-  expect(s.runs).toContainEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', MOD, 'log', '--no-color', '--no-decorate', 'origin/main..aaaaaaa'])
-  const diffAt = s.runs.findIndex((a) => a.includes('--no-textconv'))
-  expect(diffAt).toBeGreaterThan(s.runs.findIndex((a) => a[0] === 'rm'))
+  const diff = gitRuns(s.runs).find((a) => a.includes('--no-textconv'))!
+  expect(dirOf(diff)).toMatch(BARE)
+  expect(diff.slice(-5)).toEqual(['diff', '--no-ext-diff', '--no-textconv', '--no-color', 'refs/remotes/origin/main...aaaaaaa'])
+  const fetch = gitRuns(s.runs).find((a) => a.includes('fetch') && dirOf(a) === dirOf(diff))!
+  expect(fetch.slice(-3)).toEqual([`https://oauth2:${SECRET}@host/g/p.git`, '+refs/heads/factory/7-add-vat-rounding:refs/factory/build', '+refs/heads/main:refs/remotes/origin/main'])
+  expect(s.runs).toContainEqual(['rm', '-rf', dirOf(diff)!])
 })
 
-test('R20: approve writes branch.diff before running the approver', async () => {
-  const verdicts = [
-    c('v1', '<!-- factory:verdict role=code-reviewer pass=true round=0 sha=aaaaaaa -->\n- none', 6),
-    c('v2', '<!-- factory:verdict role=security-reviewer pass=true round=0 sha=aaaaaaa -->\n- none', 7),
-  ]
-  const s = setup('approve', [...dossier(), c('t', REPORT_OK, 5), ...verdicts], { agents: { approver: 'APPROVE\n\nok' } })
-  const r = await advance(ref, s.deps)
-  expect(r.to).toBe('mr-open')
-  expect(s.files[`${WT}/.factory/branch.diff`]).toBeDefined()
-  for (const argv of s.runs.filter((a) => a[0] === 'git' && dirOf(a) === WT)) expect(argv).toContain('set-url')
+test('R22: .factory is removed and re-created before the mod writes into it (build and review)', async () => {
+  for (const st of ['build', 'review'] as const) {
+    const s = setup(st, [...dossier(), c('t', REPORT_OK, 5)], {
+      agents: { builder: 'ok\nBUILD-DONE', 'code-reviewer': 'VERDICT: pass\n- none', 'security-reviewer': 'VERDICT: pass\n- none' },
+    })
+    const order: string[] = []
+    const write = s.deps.writeFile
+    s.deps.writeFile = async (p, t) => { order.push(`write:${p}`); return write(p, t) }
+    const run = s.deps.run
+    s.deps.run = async (argv, o) => { if (argv[0] === 'rm' || argv[0] === 'mkdir') order.push(`${argv[0]}:${argv.at(-1)}`); return run(argv, o) }
+    await advance(ref, s.deps)
+    const rm = order.indexOf(`rm:${WT}/.factory`)
+    const mk = order.indexOf(`mkdir:${WT}/.factory`)
+    const firstWrite = order.findIndex((x) => x.startsWith(`write:${WT}/.factory/`))
+    expect(rm).toBeGreaterThan(-1)
+    expect(mk).toBeGreaterThan(rm)
+    expect(firstWrite).toBeGreaterThan(mk)
+  }
+})
+
+test('R22: a branch that tracks .factory/ is blocked without retry, naming it', async () => {
+  for (const st of ['build', 'review'] as const) {
+    const s = setup(st, [...dossier(), c('t', REPORT_OK, 5)], {
+      trackedFactory: '.factory/spec.md',
+      agents: { builder: 'ok\nBUILD-DONE', 'code-reviewer': 'VERDICT: pass\n- none', 'security-reviewer': 'VERDICT: pass\n- none' },
+    })
+    const r = await advance(ref, s.deps)
+    expect(r.to).toBe('blocked')
+    const body = s.state.comments.at(-1)!.body
+    expect(body).toContain('branch tracks .factory/')
+    expect(body).not.toContain('failed twice')
+    expect(Object.keys(s.files).some((p) => p.startsWith(`${WT}/.factory/`))).toBe(false)
+    expect(s.runs.some((a) => a.includes('push'))).toBe(false)
+  }
+  // the build-side check runs on the builder's commits in the bare repo
+  const s = setup('build', dossier(), { agents: { builder: 'ok\nBUILD-DONE' } })
+  await advance(ref, s.deps)
+  const lsTree = gitRuns(s.runs).find((a) => a.includes('ls-tree'))!
+  expect(dirOf(lsTree)).toMatch(BARE)
+  expect(lsTree.slice(-6)).toEqual(['ls-tree', '-r', '--name-only', 'refs/factory/build', '--', '.factory'])
 })

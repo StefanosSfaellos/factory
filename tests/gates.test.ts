@@ -268,3 +268,43 @@ test('child session: Monitor with git push is denied through the hook', async ($
   expect((await $.tool.call({ tool: 'Monitor', command: 'git push', description: 'x' })).deny).toBeDefined()
   expect((await $.tool.call({ tool: 'Grep', pattern: 'x', path: '/w/src' })).deny).toBeUndefined()
 })
+
+// ---- fix round 2: R23 ----
+test('R23: Read/Grep/Glob/LS outside the worktree are denied for every child role, builder included', () => {
+  for (const role of ['builder', ...READ_ONLY] as Role[]) {
+    for (const call of [
+      { tool: 'Read', input: { file_path: '/etc/passwd' } },
+      { tool: 'Read', input: { file_path: '/w/../home/u/.ssh/id_rsa' } },
+      { tool: 'Read', input: { file_path: '../other/x' } },
+      { tool: 'Read', input: { file_path: '~/.claude.json' } },
+      { tool: 'Read', input: { file_path: '/wx/a' } },
+      { tool: 'Grep', input: { pattern: 'TOKEN', path: '/home/u' } },
+      { tool: 'Glob', input: { pattern: '*', path: '/' } },
+      { tool: 'Glob', input: { pattern: '../**/*.env' } },
+      { tool: 'Glob', input: { pattern: '/etc/*' } },
+      { tool: 'LS', input: { path: '/tmp' } },
+    ]) expect(denied(gate(call, ctx(role)))).toBe(true)
+    for (const call of [
+      { tool: 'Read', input: { file_path: '/w/src/a.php' } },
+      { tool: 'Read', input: { file_path: 'src/a.php' } },
+      { tool: 'Grep', input: { pattern: 'x' } },
+      { tool: 'Grep', input: { pattern: 'x', path: '/w/src' } },
+      { tool: 'Glob', input: { pattern: 'src/**/*.php' } },
+      { tool: 'LS', input: { path: '/w' } },
+    ]) expect(gate(call, ctx(role))).toEqual({ allow: true })
+    expect(denied(gate({ tool: 'Read', input: { file_path: '/w/a' } }, ctx(role, { worktree: undefined })))).toBe(true)
+  }
+})
+
+test('R23: /proc is denied for reads and in builder shell commands', () => {
+  for (const role of ['builder', 'code-reviewer'] as Role[]) {
+    for (const p of ['/proc/1/environ', '/proc/self/environ', '/PROC/1/environ', '/w/../proc/1/environ']) {
+      expect(denied(gate({ tool: 'Read', input: { file_path: p } }, ctx(role, { worktree: '/' })))).toBe(true)
+    }
+  }
+  for (const c of [
+    'cat /proc/$PPID/environ', "cat /proc/1/environ | tr '\\0' '\\n'", 'cd /proc && cat 1/environ', 'cat "/pr"oc/1/environ',
+    'ps eww', 'xargs -0 < /proc/self/environ', 'strings /proc/*/environ', 'cat /p{r,}oc/1/cmdline',
+  ]) expect(denied(gate(bash(c), ctx('builder')))).toBe(true)
+  expect(gate(bash('npm test -- --env=node'), ctx('builder'))).toEqual({ allow: true })
+})
