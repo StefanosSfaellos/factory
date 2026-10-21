@@ -3,7 +3,11 @@
 # FACTORY_GITLAB_TOKEN: a project access token (scope api) in a masked CI variable.
 # The job runs only when an earlier job failed, on the default branch. A failed job's
 # log is not visible to a later job, so have the job to watch write ci-failure.log
-# (`npm test 2>&1 | tee ci-failure.log`) and list it under `artifacts: when: always`.
+# and keep its exit code (tee hides it otherwise):
+#   script: [ "set -o pipefail; npm test 2>&1 | tee ci-failure.log" ]   # bash/sh with pipefail
+#   artifacts: { when: always, paths: [ci-failure.log] }
+# JOB_NAME below must name that failed job (a later job cannot read $CI_JOB_NAME of it).
+# Mask FACTORY_GITLAB_TOKEN; the script also redacts known token shapes from the log.
 factory-intake:
   stage: .post
   image: node:20-alpine

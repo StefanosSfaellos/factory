@@ -13,11 +13,16 @@ const HEAD: Record<SlackKind, string> = {
   blocked: 'Job blocked',
 }
 
+const MAX_DETAIL = 500
+
+/** Slack's mrkdwn control characters: no live <!channel>, <@U..> or <url|label> from user text. */
+export const escapeSlack = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
 /** The JSON body for a Slack incoming webhook: `{ text }`, redacted. */
 export function slackPayload(ev: SlackEvent, secrets: string[] = []): string {
-  const where = `${ev.ref.forge}:${ev.ref.project}#${ev.ref.issue}`
-  const lines = [`*${HEAD[ev.kind]}*: ${ev.title} (${where})`, ev.url]
-  if (ev.detail) lines.push(ev.detail)
+  const where = escapeSlack(`${ev.ref.forge}:${ev.ref.project}#${ev.ref.issue}`)
+  const lines = [`*${HEAD[ev.kind]}*: ${escapeSlack(ev.title)} (${where})`, escapeSlack(ev.url)]
+  if (ev.detail) lines.push(escapeSlack(redact(ev.detail, secrets).slice(0, MAX_DETAIL)))
   return JSON.stringify({ text: redact(lines.join('\n'), secrets) })
 }
 

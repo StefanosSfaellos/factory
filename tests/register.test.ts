@@ -324,3 +324,43 @@ test('a failing Slack post never fails the tick', { options: { repos: 'gitlab:g/
   expect(logs.join('\n')).toContain('webhook answered 500')
   expect(logs.join('\n')).not.toContain('SECRETXYZ')
 })
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function specStubs(on: any) {
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout' as const, text: '{"type":"result","subtype":"success","result":"## Goal\\nx"}\n' }
+    return { value: { code: 0, signal: null } }
+  } as any)
+}
+
+test('spec -> awaiting-spec posts one needs-spec-review message with the issue URL', { options: { repos: 'gitlab:g/p', workerId: 'w1', slackWebhook: HOOK } }, async ($, on) => {
+  const posts: string[] = []
+  mock.env(on, { GITLAB_TOKEN: 'x', HOME: '/home/u' })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  gitlab(on, 'spec', (e) => {
+    if (!e.url.startsWith('https://hooks.slack.com')) return undefined
+    posts.push(e.init?.body ?? '')
+    return { value: { status: 200, ok: true, headers: {}, text: 'ok' } }
+  })
+  specStubs(on)
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  await $.command.run({ command: 'factory', args: 'run #4' })
+  expect(posts.length).toBe(1)
+  expect(JSON.parse(posts[0]!).text).toContain('Spec needs your review')
+  expect(JSON.parse(posts[0]!).text).toContain('https://gitlab.com/g/p/-/issues/4')
+})
+
+test('no webhook, no Slack post', { options: { repos: 'gitlab:g/p', workerId: 'w1' } }, async ($, on) => {
+  let slack = 0
+  mock.env(on, { GITLAB_TOKEN: 'x', HOME: '/home/u' })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  gitlab(on, 'spec', (e) => (e.url.includes('slack') ? (slack++, { value: { status: 200, ok: true, headers: {}, text: '' } }) : undefined))
+  specStubs(on)
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  const r = await $.command.run({ command: 'factory', args: 'run #4' })
+  expect(r.text).toContain('awaiting-spec')
+  expect(slack).toBe(0)
+})

@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { slackPayload, slackEvents } from '../src/notify'
+import { slackPayload, slackEvents, notifyInfo } from '../src/notify'
 import type { JobRef } from '../src/types'
 
 const ref: JobRef = { forge: 'gitlab', project: 'g/p', issue: 7 }
@@ -51,4 +51,27 @@ test('a loader failure drops that event, not the others', async () => {
     async (r) => { if (r.issue === 7) throw new Error('x'); return { title: 't', issueUrl: 'i' } },
   )
   expect(evs.map((e) => e.ref.issue)).toEqual([9])
+})
+
+test('Slack control characters are escaped and detail is capped', () => {
+  const p = JSON.parse(slackPayload({ ref, title: '<!channel> <http://x|y> &', kind: 'blocked', url: 'u', detail: '<@U123>' + 'a'.repeat(900) }))
+  expect(p.text).not.toContain('<!channel>')
+  expect(p.text).toContain('&lt;!channel&gt; &lt;http://x|y&gt; &amp;')
+  expect(p.text).not.toContain('<@U123>')
+  expect(p.text.length).toBeLessThan(700)
+})
+
+test('mr-open: notifyInfo takes the MR url from the approval marker; blocked takes the reason', async () => {
+  const job = {
+    ref, title: 'T', body: '', labels: [],
+    comments: [
+      { id: '1', body: '<!-- factory:approval mr=https://h/mr/3 -->\nok', createdAt: '2026-10-21T10:00:00Z', author: 'bot' },
+      { id: '2', body: '<!-- factory:blocked station=build -->\nfailed twice', createdAt: '2026-10-21T11:00:00Z', author: 'bot' },
+    ],
+  }
+  const info = notifyInfo(job, 'https://i')
+  expect(info.mrUrl).toBe('https://h/mr/3')
+  expect(info.blockedReason).toBe('failed twice')
+  const evs = await slackEvents([{ ref, from: 'approve', to: 'mr-open', needsHuman: true }], async () => info)
+  expect(evs[0]?.url).toBe('https://h/mr/3')
 })
