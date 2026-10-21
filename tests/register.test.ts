@@ -106,12 +106,14 @@ test('parseCommand("revise #4") is an error mentioning notes', () => {
 
 /** A tiny GitLab in memory, answering $.http.fetch for one issue. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function gitlab(on: any, station: string) {
+function gitlab(on: any, station: string, extra?: (e: { url: string; init?: { body?: string } }) => { value: unknown } | undefined) {
   const issue = { labels: [`factory::${station}`] as string[], notes: [] as { id: number; body: string; created_at: string; author: { username: string } }[] }
   const reqs: { method: string; url: string; body?: string }[] = []
   let n = 0
   on('http.fetch', (_: unknown, e: { url: string; init?: { method?: string; body?: string; headers?: Record<string, string> } }) => {
     const method = e.init?.method ?? 'GET'
+    const other = extra?.(e)
+    if (other) return other
     reqs.push({ method, url: e.url, body: e.init?.body })
     const u = e.url.replace('https://gitlab.com/api/v4', '')
     if (u === '/user') return json({ username: 'bot' })
@@ -281,4 +283,44 @@ test('the parallel option limits how many jobs one tick leases', { options: { re
   await $.session.start({ cwd: '/', surface: null, isInteractive: false })
   const r = await $.command.run({ command: 'factory', args: 'tick' })
   expect(r.text).toContain('skipped (parallel limit reached)')
+})
+
+const HOOK = 'https://hooks.slack.com/services/T0/B0/SECRETXYZ'
+
+test('a job that lands on blocked posts one Slack message; the webhook never reaches the forge or the log', { options: { repos: 'gitlab:g/p', workerId: 'w1', slackWebhook: HOOK } }, async ($, on) => {
+  const posts: { url: string; body: string }[] = []
+  const logs: string[] = []
+  mock.env(on, { GITLAB_TOKEN: 'x', HOME: '/home/u' })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('ui.log', (_, e) => { logs.push(JSON.stringify(e)); return { value: undefined } })
+  const gl = gitlab(on, 'build', (e) => {
+    if (!e.url.startsWith('https://hooks.slack.com')) return undefined
+    posts.push({ url: e.url, body: e.init?.body ?? '' })
+    return { value: { status: 200, ok: true, headers: {}, text: 'ok' } }
+  })
+  gl.issue.labels = ['factory::build', 'factory::plan']
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  await $.command.run({ command: 'factory', args: 'tick' })
+  expect(posts.length).toBe(1)
+  expect(posts[0]!.url).toBe(HOOK)
+  expect(JSON.parse(posts[0]!.body).text).toContain('Job blocked')
+  expect(JSON.parse(posts[0]!.body).text).toContain('https://gitlab.com/g/p/-/issues/4')
+  expect(gl.reqs.some((r) => (r.body ?? '').includes('SECRETXYZ'))).toBe(false)
+  expect(logs.join('\n')).not.toContain('SECRETXYZ')
+})
+
+test('a failing Slack post never fails the tick', { options: { repos: 'gitlab:g/p', workerId: 'w1', slackWebhook: HOOK } }, async ($, on) => {
+  const logs: string[] = []
+  mock.env(on, { GITLAB_TOKEN: 'x', HOME: '/home/u' })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('ui.log', (_, e) => { logs.push(JSON.stringify(e)); return { value: undefined } })
+  const gl = gitlab(on, 'build', (e) => (e.url.startsWith('https://hooks.slack.com') ? { value: { status: 500, ok: false, headers: {}, text: 'no' } } : undefined))
+  gl.issue.labels = ['factory::build', 'factory::plan']
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  const r = await $.command.run({ command: 'factory', args: 'tick' })
+  expect(r.text).toContain('#4')
+  expect(logs.join('\n')).toContain('webhook answered 500')
+  expect(logs.join('\n')).not.toContain('SECRETXYZ')
 })

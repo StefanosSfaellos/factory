@@ -1,0 +1,26 @@
+# Add this job to your .gitlab-ci.yml. Copy ci/factory-intake.mjs to `.factory-intake.mjs`
+# at the repo root (the README explains how).
+# FACTORY_GITLAB_TOKEN: a project access token (scope api) in a masked CI variable.
+# The job runs only when an earlier job failed, on the default branch. A failed job's
+# log is not visible to a later job, so have the job to watch write ci-failure.log
+# (`npm test 2>&1 | tee ci-failure.log`) and list it under `artifacts: when: always`.
+factory-intake:
+  stage: .post
+  image: node:20-alpine
+  when: on_failure
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: on_failure
+  needs:
+    - job: test
+      artifacts: true
+      optional: true
+  variables:
+    FORGE: gitlab
+    PROJECT: $CI_PROJECT_PATH
+    TOKEN: $FACTORY_GITLAB_TOKEN
+    API_URL: $CI_SERVER_URL
+    JOB_NAME: test
+    LOG_FILE: ci-failure.log
+  script:
+    - node .factory-intake.mjs

@@ -10,8 +10,9 @@ import { gate, type GateCtx } from '../src/gates'
 import type { Role } from '../src/config'
 import type { RunFn } from '../src/worktree'
 import { redact } from '../src/redact'
+import { notifyInfo, slackEvents, slackPayload } from '../src/notify'
 import type { JobRef, Station } from '../src/types'
-import { dossierMarkdown, isWorking, jobKey, latestSpec, loadViews, mergeProgress, sameRef, spinnerSuffix, transitionToast } from '../src/ui/model'
+import { dossierMarkdown, isWorking, issueUrl, jobKey, latestSpec, loadViews, mergeProgress, sameRef, spinnerSuffix, transitionToast } from '../src/ui/model'
 import { bandTree, paneTree, type Actions, type Elements } from '../src/ui/render'
 import type { JobDetail, RunningStation } from '../types'
 
@@ -53,8 +54,10 @@ type State = {
   timer?: { cancel: () => void }
   /** The user's own session (not a child the factory started): the only one that draws. */
   parent: boolean
-  /** The forge tokens, for redacting what the UI draws. */
+  /** The forge tokens and the Slack webhook, for redacting what the UI draws. */
   secrets: string[]
+  /** The Slack incoming-webhook URL (a secret); empty when notifications are off. */
+  webhook: string
   /** Spinner and progress writes, applied one after another in the order the tick raised them. */
   uiQueue: Promise<void>
   /** Ticks this session finished; a press tells by it whether its re-tick ran. */
@@ -76,6 +79,7 @@ export const register: Register = (on, options) => {
     lock: { busy: false },
     parent: false,
     secrets: [],
+    webhook: typeof options.slackWebhook === 'string' ? options.slackWebhook.trim() : '',
     uiQueue: Promise.resolve(),
     ticks: 0,
   }
@@ -85,7 +89,7 @@ export const register: Register = (on, options) => {
     // Child sessions (an agent the factory started): no commands, no ticker. Task 10 adds gates.
     if (await $.env.get('FACTORY_ROLE')) return started
     st.parent = true
-    st.secrets = await sessionSecrets($)
+    st.secrets = await sessionSecrets($, st)
     if (st.workerId === '' || st.workerId === 'worker') st.workerId = await sessionWorkerId($)
     await $.command.register({
       name: 'factory',
@@ -267,6 +271,33 @@ async function afterTick($: Engine, st: State, r: TickResult): Promise<void> {
   $.ui.invalidate('ui.render')
 }
 
+/**
+ * Slack, once per transition into awaiting-spec, mr-open or blocked in this tick result.
+ * Never throws: a failed post is logged (redacted, without the webhook) and dropped.
+ */
+async function notifySlack($: Engine, st: State, r: TickResult, forges: Partial<Record<'github' | 'gitlab', Forge>>): Promise<void> {
+  try {
+    const info = async (ref: JobRef) => {
+      const forge = forges[ref.forge]
+      if (!forge) throw new Error(`no ${ref.forge} forge`)
+      const raw = await forge.getJob(ref)
+      const job = { ...raw, comments: ownMarkersOnly(raw.comments, await forge.whoami()) }
+      const project = st.projects.find((p) => p.forge === ref.forge && p.project === ref.project)
+      return notifyInfo(job, issueUrl(forge.publicUrl(project?.project ?? ref.project), ref))
+    }
+    for (const ev of await slackEvents(r.advanced, info)) {
+      try {
+        const res = await $.http.fetch(st.webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: slackPayload(ev, st.secrets) })
+        if (!res.ok) $.ui.log(`factory slack: webhook answered ${res.status}`, { to: 'debug' })
+      } catch (err) {
+        $.ui.log(redact(`factory slack: post failed: ${err instanceof Error ? err.message : String(err)}`, st.secrets), { to: 'debug' })
+      }
+    }
+  } catch (err) {
+    $.ui.log(redact(`factory slack: ${err instanceof Error ? err.message : String(err)}`, st.secrets), { to: 'debug' })
+  }
+}
+
 async function stepChanged($: Engine, ref: JobRef, station: Station | null): Promise<void> {
   await update($, runningAtom, (list) => {
     const rest = list.filter((r) => !sameRef(r.ref, ref))
@@ -281,8 +312,8 @@ async function progressed($: Engine, st: State, ref: JobRef, text: string): Prom
   await update($, jobsAtom, (jobs) => jobs.map((j) => (sameRef(j.ref, ref) ? { ...j, progress: line } : j)))
 }
 
-async function sessionSecrets($: Engine): Promise<string[]> {
-  return [(await $.env.get('GITHUB_TOKEN')) ?? '', (await $.env.get('GITLAB_TOKEN')) ?? ''].filter((s) => s !== '')
+async function sessionSecrets($: Engine, st: State): Promise<string[]> {
+  return [(await $.env.get('GITHUB_TOKEN')) ?? '', (await $.env.get('GITLAB_TOKEN')) ?? '', st.webhook].filter((s) => s !== '')
 }
 
 async function gateCtx($: Engine, role: Role, spec: { path?: string; text?: string }): Promise<GateCtx> {
@@ -308,7 +339,7 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
   const gitlabToken = (await $.env.get('GITLAB_TOKEN')) ?? ''
   const gitlabUrl = (await $.env.get('GITLAB_URL')) || 'https://gitlab.com'
   const home = (await $.env.get('HOME')) ?? ''
-  st.secrets = [githubToken, gitlabToken].filter((x) => x !== '')
+  st.secrets = [githubToken, gitlabToken, st.webhook].filter((x) => x !== '')
   // Only the user's own interactive session draws: toasts, views, the spinner.
   const ui = st.parent && st.interactive
 
@@ -368,7 +399,7 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
       spawn,
       pluginRoot: $.plugin.root,
       workRoot: `${home}/.factory/work`,
-      secrets: [githubToken, gitlabToken].filter((s) => s !== ''),
+      secrets: st.secrets,
       workerId: st.workerId,
       forgeHosts: forgeHostsOf(gitlabUrl),
       now: () => Date.now(),
@@ -392,7 +423,12 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
       else startTicker($, st)
     },
     isPaused: () => st.paused,
-    onTick: ui ? (r) => afterTick($, st, r) : undefined,
+    onTick: ui || st.webhook !== ''
+      ? async (r) => {
+        if (st.webhook !== '') await notifySlack($, st, r, forges)
+        if (ui) await afterTick($, st, r)
+      }
+      : undefined,
     onStep: ui ? (ref, station) => enqueue(st, () => stepChanged($, ref, station && isWorking(station) ? station : null)) : undefined,
   }
 }
