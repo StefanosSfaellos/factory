@@ -76,6 +76,7 @@ test('blank test command fails without running', async () => {
   expect(r.passed).toBe(false)
   expect(r.report).toContain('passed=false')
   expect(f.calls.some((c) => c[0] === 'sh')).toBe(false)
+  expect(f.calls.some((c) => c[0] === 'git' && c[1] === 'clone')).toBe(false)
 })
 test('setup passes, test times out', async () => {
   const f = fake((c) => (c === 'npm test' ? { exitCode: -1, timedOut: true } : { exitCode: 0 }))

@@ -53,8 +53,12 @@ test('empty slug falls back to issue', () => {
   expect(branchName(ref, '!!!', 'factory/')).toBe('factory/42-issue')
 })
 test('extra secrets redacted in checkout errors', async () => {
-  const f = fake(false, false, 'clone')
+  const run: RunFn = async (argv) =>
+    argv[0] === 'test' ? { exitCode: 1, stdout: '', stderr: '' }
+      : argv[1] === 'clone' ? { exitCode: 128, stdout: '', stderr: 'fatal: auth failed for token SECRETX' }
+      : { exitCode: 0, stdout: '', stderr: '' }
   let msg = ''
-  try { await ensureCheckout(f.run, { ...o, secrets: ['host'] }) } catch (e) { msg = (e as Error).message }
-  expect(msg.includes('host')).toBe(false)
+  try { await ensureCheckout(run, { ...o, secrets: ['SECRETX'] }) } catch (e) { msg = (e as Error).message }
+  expect(msg).toContain('auth failed')
+  expect(msg.includes('SECRETX')).toBe(false)
 })
