@@ -26,7 +26,7 @@
     "parallel": {
       "type": "number",
       "title": "Parallel jobs",
-      "description": "How many jobs one tick advances at once (per forge)",
+      "description": "Global cap on how many jobs one tick leases and advances at once",
       "default": 2
     },
     "slackWebhook": {

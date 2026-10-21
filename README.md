@@ -10,10 +10,10 @@ Tested with Claude Code 2.1.306.
 claude --plugin-dir /path/to/software-factory        # try it from a checkout
 ```
 
-or, once it is published in a marketplace (replace `<owner>/<repo>` with that marketplace):
+or from a marketplace (one must exist and list the plugin first):
 
 ```sh
-/plugin install software-factory --marketplace <owner>/<repo>
+claude plugin install software-factory@<marketplace>
 ```
 
 Then enable it. The plugin root is the repository root.
@@ -31,7 +31,7 @@ Then enable it. The plugin root is the repository root.
    | `repos` | string | empty | Comma-separated, e.g. `github:owner/name,gitlab:group/name` |
    | `workerId` | string | `worker` | Id used when taking leases; left as `worker`, each session uses `<host>-<random>` |
    | `tickMinutes` | number | 10 | How often the session ticker polls the forges |
-   | `parallel` | number | 2 | Jobs one tick advances at once, per forge |
+   | `parallel` | number | 2 | Global cap on jobs a tick leases and advances at once |
    | `slackWebhook` | string | empty | Optional Slack incoming-webhook URL for notifications |
 
 3. **`.factory.yml`** at the root of each repository's default branch (see below).
@@ -43,7 +43,7 @@ Each issue carries exactly one station label. The factory posts its output as a 
 
 | Label | Meaning |
 |---|---|
-| `factory::ready` | Queued; next tick starts the spec |
+| `factory::ready` | Queued; the next tick runs the spec-writer through to `factory::awaiting-spec` |
 | `factory::spec` | Spec-writer is working |
 | `factory::awaiting-spec` | Spec posted; waiting for a human `/approve` or `/revise` |
 | `factory::spec-approved` | Spec approved |
@@ -57,7 +57,7 @@ Each issue carries exactly one station label. The factory posts its output as a 
 | `factory::done` | Finished |
 | `factory::blocked` | Needs a person; the latest `factory:blocked` comment says why. Zero or several station labels also land here. Fix and relabel to resume |
 
-Labels are created by the forge when first applied.
+GitHub and GitLab create missing labels when the factory applies them; if your forge settings prevent that, create the 13 labels first. One tick advances a job through stations until it reaches a human gate (`awaiting-spec`, `mr-open`), a failure, `blocked`, or a 30-step cap.
 
 Humans act by commenting on the issue:
 
@@ -118,7 +118,7 @@ Read from the default branch. Required: `forge`, `test`.
 | `protectedPaths` | `[]` | Globs the builder may not change |
 | `models` | see below | Per-role model overrides |
 | `limits.fixLoops` | 3 | Review/verify rounds before the job is blocked |
-| `limits.parallel` | 2 | Parallel jobs |
+| `limits.parallel` | 2 | Currently ignored; use the `parallel` plugin option |
 | `branchPrefix` | `factory/` | Branch is `<prefix><issue>-<slug>` |
 | `allowedTools` | `[]` | Extra tools for the builder |
 | `sandbox` | see below | Bash sandbox for the agents |
