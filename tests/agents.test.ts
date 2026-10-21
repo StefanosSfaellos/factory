@@ -12,9 +12,10 @@ function after(argv: string[], flag: string): string | undefined {
 
 test('childArgv: env prefix, claude invocation and namespaced agent', () => {
   const a = childArgv({ ...base, role: 'planner' })
-  expect(a.slice(0, 9)).toEqual([
-    'env', 'FACTORY_ROLE=planner', 'FACTORY_JOB=gitlab:g/p#7', 'FACTORY_WORKTREE=/wt',
-    'FACTORY_SPEC_FILE=/wt/.factory/spec.md', 'FACTORY_PROTECTED=', 'claude', '-p', 'do it',
+  expect(a.slice(0, 16)).toEqual([
+    'env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL',
+    'FACTORY_ROLE=planner', 'FACTORY_JOB=gitlab:g/p#7', 'FACTORY_WORKTREE=/wt',
+    'FACTORY_SPEC_FILE=/wt/.factory/spec.md', 'FACTORY_PROTECTED=', 'FACTORY_FORGE_HOSTS=', 'claude', '-p', 'do it',
   ])
   expect(after(a, '--plugin-dir')).toBe('/plug')
   expect(after(a, '--agent')).toBe('software-factory:planner')
@@ -29,6 +30,18 @@ test('childArgv: env prefix, claude invocation and namespaced agent', () => {
 test('childArgv: passes protectedPaths to the child gate as FACTORY_PROTECTED', () => {
   const c = { ...cfg, protectedPaths: ['db/migrations/**', '.gitlab-ci.yml'] } as RepoConfig
   expect(childArgv({ ...base, cfg: c, role: 'builder' })).toContain('FACTORY_PROTECTED=db/migrations/**,.gitlab-ci.yml')
+})
+
+test('childArgv: forge tokens are unset in the child (R18); forge hosts passed for the gate', () => {
+  const a = childArgv({ ...base, role: 'builder', forgeHosts: ['github.com', 'api.github.com', 'lab.example.gr'] })
+  const claude = a.indexOf('claude')
+  for (const v of ['GITHUB_TOKEN', 'GITLAB_TOKEN', 'GITLAB_URL']) {
+    const i = a.indexOf(v)
+    expect(a[i - 1]).toBe('-u')
+    expect(i).toBeLessThan(a.indexOf('FACTORY_ROLE=builder'))
+  }
+  expect(a.slice(0, claude)).toContain('FACTORY_FORGE_HOSTS=github.com,api.github.com,lab.example.gr')
+  expect(a.slice(0, claude).some((w) => /TOKEN=/.test(w))).toBe(false)
 })
 
 test('childArgv: security-reviewer is read-only and uses opus', () => {

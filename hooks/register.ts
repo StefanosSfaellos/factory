@@ -64,10 +64,21 @@ export const register: Register = (on, options) => {
 
   // Gates (spec §4.2, §12): registered in every session, active only in a child
   // (FACTORY_ROLE set). The user's own session is never gated. Fails closed.
+  // `child` records what the role read found: a failure to read it in the user's own
+  // session lets the call through; once the session is known to be a child, any
+  // failure denies.
   const spec: { path?: string; text?: string } = {}
+  const child = { known: false }
   on('tool.call', async ($, e, next) => {
-    const role = await $.env.get('FACTORY_ROLE')
+    let role: string | undefined
+    try {
+      role = await $.env.get('FACTORY_ROLE')
+    } catch {
+      if (!child.known) return next(e)
+      throw new Error('factory gate: cannot read FACTORY_ROLE')
+    }
     if (!role) return next(e)
+    child.known = true
     const ctx = await gateCtx($, role as Role, spec)
     const { tool, ...input } = e
     const verdict = gate({ tool, input: input as Record<string, unknown> }, ctx)
@@ -83,8 +94,8 @@ export const register: Register = (on, options) => {
 async function gateCtx($: Engine, role: Role, spec: { path?: string; text?: string }): Promise<GateCtx> {
   const worktree = (await $.env.get('FACTORY_WORKTREE')) || undefined
   const protectedPaths = ((await $.env.get('FACTORY_PROTECTED')) ?? '').split(',').map((g) => g.trim()).filter((g) => g !== '')
-  const gitlabUrl = (await $.env.get('GITLAB_URL')) ?? ''
-  const forgeHosts = gitlabUrl === '' ? [] : [gitlabUrl.replace(/^[a-z]+:\/\//i, '').replace(/[/:].*$/, '')]
+  // R18: the child has no forge tokens or GITLAB_URL; the parent passes the hosts.
+  const forgeHosts = ((await $.env.get('FACTORY_FORGE_HOSTS')) ?? '').split(',').map((h) => h.trim()).filter((h) => h !== '')
   // The spec is written before the child starts; it is read once, at the child's first
   // tool call, so a later change to the file by the agent itself cannot widen what it
   // may edit. A missing file means no exceptions; a failing read fails the gate closed.
@@ -162,6 +173,7 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
       workRoot: `${home}/.factory/work`,
       secrets: [githubToken, gitlabToken].filter((s) => s !== ''),
       workerId: st.workerId,
+      forgeHosts: forgeHostsOf(gitlabUrl),
       now: () => Date.now(),
       onProgress: (ref, text) => $.ui.log(`factory ${ref.forge}:${ref.project}#${ref.issue}: ${text}`, { to: 'debug' }),
       writeFile: (path, text) => $.fs.write(path, text),
@@ -177,6 +189,12 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
     },
     isPaused: () => st.paused,
   }
+}
+
+/** Hosts the builder gate treats as the forge: GitHub's and the configured GitLab's. */
+function forgeHostsOf(gitlabUrl: string): string[] {
+  const gitlab = gitlabUrl.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/^[^@/]*@/, '').replace(/[/:?#].*$/, '').toLowerCase()
+  return [...new Set(['github.com', 'api.github.com', 'uploads.github.com', gitlab].filter((h) => h !== ''))]
 }
 
 async function timedTick($: Engine, st: State): Promise<void> {

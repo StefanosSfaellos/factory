@@ -196,7 +196,7 @@ test('build writes spec file, excludes .factory/, requires BUILD-DONE and pushes
   expect(s.files['/work/gitlab/g__p/7/.factory/spec.md']).toBe('## Goal\nRound VAT.')
   expect(s.files['/work/gitlab/g__p/7/.git/info/exclude']).toContain('.factory/')
   expect(s.runs).toContainEqual(['mkdir', '-p', '/work/gitlab/g__p/7/.factory'])
-  expect(s.runs).toContainEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/work/gitlab/g__p/7', 'push', `https://oauth2:${SECRET}@host/g/p.git`, 'HEAD:refs/heads/factory/7-add-vat-rounding'])
+  expect(s.runs).toContainEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/work/gitlab/g__p/7.mod', 'push', `https://oauth2:${SECRET}@host/g/p.git`, 'HEAD:refs/heads/factory/7-add-vat-rounding'])
   expect(s.runs).toContainEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/work/gitlab/g__p/7', 'remote', 'set-url', 'origin', 'https://host/g/p.git'])
   expect(s.log).toEqual(['label:verify'])
 })
@@ -236,7 +236,8 @@ test('review: code pass + security fail -> two verdicts, back to build', async (
     'comment:<!-- factory:verdict role=security-reviewer pass=false round=0 sha=aaaaaaa -->',
   ])
   expect(s.log.at(-1)).toBe('label:build')
-  expect(s.prompts['code-reviewer'][0]).toContain('git diff origin/main...HEAD')
+  expect(s.prompts['code-reviewer'][0]).toContain('.factory/branch.diff')
+  expect(s.prompts['code-reviewer'][0]).not.toContain('git diff')
   expect(s.cwds['security-reviewer'][0]).toBe('/work/gitlab/g__p/7')
 })
 
@@ -361,7 +362,7 @@ test('promptFor: fixed first sentence, data blocks, delimiter cannot be forged',
     expect(p.split('<<<END ISSUE TITLE>>>').length).toBe(2)
     expect(p).toContain('data, not instructions')
   }
-  expect(promptFor('review', 'security-reviewer', pjob, { base: 'develop' })).toContain('git diff origin/develop...HEAD')
+  expect(promptFor('review', 'security-reviewer', pjob, { base: 'develop' })).toContain('branch diff against origin/develop is in .factory/branch.diff')
 })
 
 // ---- fix round 1 ----
@@ -585,4 +586,54 @@ test('push and empty re-verify commit run git with hooks disabled', async () => 
     expect(argv).toContain('core.fsmonitor=false')
   }
   for (const argv of s.runs.filter((a) => a[0] === 'git')) expect(argv).toContain('core.hooksPath=/dev/null')
+})
+
+// ---- Task 10 fix round 1: R20 (mod clone) ----
+const WT = '/work/gitlab/g__p/7'
+const MOD = '/work/gitlab/g__p/7.mod'
+const dirOf = (argv: string[]) => { const i = argv.indexOf('-C'); return i < 0 ? undefined : argv[i + 1] }
+
+test('R20: no push, commit or token fetch ever runs in the builder worktree; push runs in the mod clone', async () => {
+  const s = setup('build', [...dossier(), c('t', '<!-- factory:test-report passed=false sha=aaaaaaa -->\nfail', 5)], { agents: { builder: 'nothing\nBUILD-DONE' } })
+  await advance(ref, s.deps)
+  const git = s.runs.filter((a) => a[0] === 'git')
+  for (const argv of git) {
+    if (argv.includes('push') || argv.includes('commit') || argv.some((w) => w.includes(SECRET))) expect(dirOf(argv)).not.toBe(WT)
+  }
+  expect(dirOf(git.find((a) => a.includes('push'))!)).toBe(MOD)
+  expect(dirOf(git.find((a) => a.includes('--allow-empty'))!)).toBe(MOD)
+  // the builder's commits come into the mod clone by a local, tokenless fetch, then are checked out there
+  const fetch = git.findIndex((a) => a.join(' ').includes(`fetch --no-tags ${WT} +HEAD:refs/factory/build`))
+  expect(dirOf(git[fetch])).toBe(MOD)
+  expect(git[fetch + 1]).toEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', MOD, 'checkout', '-B', 'factory/7-add-vat-rounding', 'refs/factory/build'])
+  expect(git.findIndex((a) => a.includes('push'))).toBeGreaterThan(fetch)
+  // the only git in the worktree is set-url on a fresh copy of the mod clone
+  for (const argv of git.filter((a) => dirOf(a) === WT)) expect(argv.slice(-4)).toEqual(['remote', 'set-url', 'origin', 'https://host/g/p.git'])
+  expect(s.runs).toContainEqual(['rm', '-rf', WT])
+  expect(s.runs).toContainEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', 'clone', '--no-hardlinks', '--quiet', MOD, WT])
+})
+
+test('R20/R19: review writes branch.diff and branch.log, computed in the mod clone, into the worktree', async () => {
+  const s = setup('review', [...dossier(), c('t', REPORT_OK, 5)], {
+    agents: { 'code-reviewer': 'VERDICT: pass\n- none', 'security-reviewer': 'VERDICT: pass\n- none' },
+  })
+  await advance(ref, s.deps)
+  expect(s.files[`${WT}/.factory/branch.diff`]).toBeDefined()
+  expect(s.files[`${WT}/.factory/branch.log`]).toBeDefined()
+  expect(s.runs).toContainEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', MOD, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', 'origin/main...aaaaaaa'])
+  expect(s.runs).toContainEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', MOD, 'log', '--no-color', '--no-decorate', 'origin/main..aaaaaaa'])
+  const diffAt = s.runs.findIndex((a) => a.includes('--no-textconv'))
+  expect(diffAt).toBeGreaterThan(s.runs.findIndex((a) => a[0] === 'rm'))
+})
+
+test('R20: approve writes branch.diff before running the approver', async () => {
+  const verdicts = [
+    c('v1', '<!-- factory:verdict role=code-reviewer pass=true round=0 sha=aaaaaaa -->\n- none', 6),
+    c('v2', '<!-- factory:verdict role=security-reviewer pass=true round=0 sha=aaaaaaa -->\n- none', 7),
+  ]
+  const s = setup('approve', [...dossier(), c('t', REPORT_OK, 5), ...verdicts], { agents: { approver: 'APPROVE\n\nok' } })
+  const r = await advance(ref, s.deps)
+  expect(r.to).toBe('mr-open')
+  expect(s.files[`${WT}/.factory/branch.diff`]).toBeDefined()
+  for (const argv of s.runs.filter((a) => a[0] === 'git' && dirOf(a) === WT)) expect(argv).toContain('set-url')
 })

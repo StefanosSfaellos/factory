@@ -29,7 +29,7 @@ const TASK: Partial<Record<Station, string>> = {
   plan: 'Write the ordered, test-first task plan for the approved spec and design note, following your output format exactly.',
   build: 'Implement the plan test-first in the current directory and commit each task. The approved spec is also in the file named by FACTORY_SPEC_FILE. If a FAILED TEST REPORT or REVIEWER FINDINGS block is present, this is a fix loop: fix every item in it. End with the line BUILD-DONE only when everything is committed and the full test suite passes.',
   review: 'Review the changes on the current branch against the approved spec and give your verdict, following your output format exactly.',
-  approve: 'Decide whether this branch may become a merge request, following your output format exactly.',
+  approve: 'Decide whether this branch may become a merge request, following your output format exactly. The branch diff and log are in .factory/branch.diff and .factory/branch.log.',
 }
 
 export function promptFor(station: Station, role: Role, job: Job, artifacts: Record<string, string>): string {
@@ -58,7 +58,7 @@ export function promptFor(station: Station, role: Role, job: Job, artifacts: Rec
       break
     case 'review': {
       const base = safeRef(a.base)
-      parts.splice(3, 0, `The base branch is ${base}. Review the diff with: git diff origin/${base}...HEAD`)
+      parts.splice(3, 0, `The base branch is ${base}. The branch diff against origin/${base} is in .factory/branch.diff and its commit log in .factory/branch.log in the current directory; read them (you have no shell).`)
       parts.push(block('APPROVED SPEC', a.spec), block('DESIGN NOTE', a.design), block('PLAN', a.plan), block('TEST REPORT', a.report))
       break
     }

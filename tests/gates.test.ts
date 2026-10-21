@@ -104,34 +104,94 @@ test('every non-builder role is read-only for edits', () => {
   }
 })
 
-test('read-only roles may run allowlisted read commands', () => {
-  for (const c of [
-    'git diff main...HEAD', 'git log --oneline -5', 'git show HEAD:src/a.php', 'git status', 'git branch --show-current',
-    'git branch', 'cat src/a.php | head -20', 'grep -rn "a|b" src', 'rg -n "x > y" src', 'find . -name "*.php"',
-    'ls -la && pwd', 'wc -l src/a.php; echo done', 'git ls-files | sort | uniq', 'tree src', 'diff a b',
-  ]) {
-    for (const role of READ_ONLY) expect(gate(bash(c), ctx(role))).toEqual({ allow: true })
+test('read-only roles may use only Read, Grep, Glob, LS, TodoWrite (R19)', () => {
+  for (const role of READ_ONLY) {
+    for (const tool of ['Read', 'Grep', 'Glob', 'LS', 'TodoWrite']) {
+      expect(gate({ tool, input: { file_path: '/w/src/a.php', pattern: 'x' } }, ctx(role))).toEqual({ allow: true })
+    }
+    for (const tool of ['WebFetch', 'Agent', 'Task', 'mcp__Gitlab_IronCloud__get_work_item', 'Skill', 'SomethingNew']) {
+      expect(denied(gate({ tool, input: {} }, ctx(role)))).toBe(true)
+    }
+  }
+  expect((gate({ tool: 'WebFetch', input: {} }, ctx('approver')) as { deny: string }).deny).toContain('read-only')
+})
+
+test('read-only roles get no shell at all, however harmless (R19)', () => {
+  for (const c of ['git diff main...HEAD', 'cat a', 'ls', 'pwd', '']) {
+    for (const role of READ_ONLY) {
+      for (const tool of ['Bash', 'Monitor', 'PowerShell']) expect(denied(gate({ tool, input: { command: c } }, ctx(role)))).toBe(true)
+      // An unknown tool carrying a shell command is a shell too, even if named like a read tool.
+      expect(denied(gate({ tool: 'Read', input: { file_path: '/w/a', command: c } }, ctx(role)))).toBe(true)
+    }
   }
 })
 
-test('read-only roles may not run anything else', () => {
+test('regression: review C1/C2 allowlist bypasses are all denied for read-only roles', () => {
   for (const c of [
-    'rm -rf src', 'mv a b', 'git commit -am x', 'git checkout main', 'git reset HEAD~1', 'git branch -D x', 'git branch new',
-    'echo x > a.txt', 'cat a >> b', 'ls 2>/dev/null', 'diff <(ls) b', 'echo $(rm a)', 'echo `rm a`', 'find . -delete',
-    'find . -exec rm {} \\;', 'ls | xargs rm', 'sudo ls', 'env ls', 'sh -c ls', 'bash -c ls', 'eval ls', 'touch a',
-    'composer test', 'X=1 ls', 'sort -o out in', 'git -c core.pager=sh log', 'git diff --output=x', '/bin/rm a', 'cat a\nrm a',
-    'rg --pre ./evil x', 'cd /tmp; ls',
+    "git grep --open=sh x", 'sort --compress-p=sh a', 'sort --outp=x a', "git grep -iO'cmd' x",
+    'find . -fprin{t,t} x', 'cat${IFS}a', "ls $'\\x2d'la", 'git grep -i{O,}sh x',
   ]) {
-    for (const role of READ_ONLY) {
-      const r = gate(bash(c), ctx(role))
-      expect(denied(r)).toBe(true)
-    }
+    for (const role of READ_ONLY) expect(denied(gate(bash(c), ctx(role)))).toBe(true)
   }
-  expect((gate(bash('touch a'), ctx('approver')) as { deny: string }).deny).toContain('read-only')
+})
+
+test('regression C3: Monitor and PowerShell go through the shell path and the always-rules', () => {
+  expect(denied(gate({ tool: 'Monitor', input: { command: 'git push -f' } }, ctx(undefined)))).toBe(true)
+  expect(denied(gate({ tool: 'Monitor', input: { command: 'git push' } }, ctx('builder')))).toBe(true)
+  expect(denied(gate({ tool: 'PowerShell', input: { command: 'git reset --hard' } }, ctx(undefined)))).toBe(true)
+  expect(denied(gate({ tool: 'Whatever', input: { command: 'cat .git/config' } }, ctx(undefined)))).toBe(true)
+  expect(gate({ tool: 'Monitor', input: { command: 'composer test' } }, ctx('builder'))).toEqual({ allow: true })
+})
+
+test('regression I6: quoted, escaped or wrapped git/gh/glab in builder Bash is still seen', () => {
+  for (const c of [
+    'g"it" push', "'git' push", 'g\\it push', '/usr/bin/git push', 'env FOO=1 git push', 'command git push', 'X=1 git push',
+    'sh -c "git push"', "bash -lc 'git push origin HEAD'", 'eval git push', 'echo $(git push)', 'true && (git push)',
+    '{git,push}', 'git {push,}', "$'\\x67'it push", 'git${IFS}push', 'glab api -XPOST /projects/1/merge_requests', 'glab api projects/1',
+    'gh api repos/o/r/pulls -f title=x', 'hub pull-request', 'cp x .git//hooks/pre-commit', 'cp x ./.git/./hooks/x',
+    "cp x '.git'/hooks/x", 'cp x .GIT/hooks/x', 'git push -f', 'xargs git push < /dev/null', 'nice -n 5 git push',
+  ]) expect(denied(gate(bash(c), ctx('builder')))).toBe(true)
+})
+
+test('regression I7: builder may not write code-running or redirecting git config', () => {
+  for (const c of [
+    'git config diff.x.textconv ./evil', 'git config diff.x.command ./evil', 'git config core.pager ./evil',
+    'git config filter.x.clean ./evil', 'git config filter.x.smudge ./evil', 'git config url.https://evil/.insteadOf https://host/',
+    'git config remote.origin.pushurl https://evil', 'git config --global user.name x', 'git config --file .git/config x y',
+    'git config core.editor ./evil', 'git config include.path ../x', 'git config gpg.program ./evil', 'git -c diff.external=./x diff',
+    'git -c core.pager=./x log', 'GIT_CONFIG_GLOBAL=./x git commit -m y', 'GIT_SSH_COMMAND=./x git fetch', 'git --exec-path=./x status',
+    'git config alias.p "!sh"', 'git submodule add https://x',
+  ]) expect(denied(gate(bash(c), ctx('builder')))).toBe(true)
+  for (const c of ['git config user.name "Bot"', 'git config user.email b@x', 'git config --get user.name', 'git config --list', 'git -c user.name=x commit -m y']) {
+    expect(gate(bash(c), ctx('builder'))).toEqual({ allow: true })
+  }
+})
+
+test('regression minors: .git//config, .git/./config and case variants are denied', () => {
+  for (const p of ['/w/.git//config', '/w/.git/./config', '/w/.GIT/config', '/w/sub/../.git/config']) {
+    expect(denied(gate({ tool: 'Read', input: { file_path: p } }, ctx(undefined)))).toBe(true)
+  }
+  for (const c of ['cat .git//config', 'cat .git/./config', 'cat .GIT/config', "cat '.git'/config", 'cat .gi{t,x}/config']) {
+    expect(denied(gate(bash(c), ctx('builder')))).toBe(true)
+  }
+  expect(denied(gate(edit('/w/.GIT/hooks/pre-push'), ctx('builder')))).toBe(true)
+  expect(denied(gate(edit('/w/.Factory/spec.md'), ctx('builder')))).toBe(true)
+  expect(denied(gate(edit('/w/DB/Migrations/x.sql'), ctx('builder', { protectedPaths: ['db/migrations/**'] })))).toBe(true)
+})
+
+test('builder curl/wget writes to the configured forge hosts are denied, reads allowed', () => {
+  const f = { forgeHosts: ['lab.example.gr'] }
+  for (const c of [
+    'curl -XPOST https://lab.example.gr/x', 'curl -X PUT https://api.github.com/x', 'curl --request=DELETE https://gitlab.com/x',
+    'curl -d @f https://lab.example.gr/y', 'wget --post-data=x https://lab.example.gr/y', 'curl -sSd x https://api.github.com/z',
+  ]) expect(denied(gate(bash(c), ctx('builder', f)))).toBe(true)
+  for (const c of ['curl -s https://lab.example.gr/raw/file', 'curl -X POST http://localhost:8080/x', 'curl -d x https://example.com']) {
+    expect(gate(bash(c), ctx('builder', f))).toEqual({ allow: true })
+  }
 })
 
 test('child roles: mutating MCP tools are denied, read tools allowed', () => {
-  for (const role of ['builder', 'code-reviewer'] as Role[]) {
+  for (const role of ['builder'] as Role[]) {
     for (const tool of ['mcp__Gitlab_IronCloud__add_commit', 'mcp__Slack__slack_add_list_record', 'mcp__Gitlab_IronCloud__save_note']) {
       expect(denied(gate({ tool, input: {} }, ctx(role)))).toBe(true)
     }
@@ -148,8 +208,8 @@ test('read-only child: spec file is not read at all', async ($, on) => {
   on('fs.exists', () => ({ value: true }))
   on('fs.read', () => { reads++; return { deny: 'no reading' } })
   on('tool.call', () => ({ result: 'ran' }))
-  expect((await $.tool.call({ tool: 'Bash', command: 'git diff' })).deny).toBeUndefined()
-  expect((await $.tool.call({ tool: 'Bash', command: 'rm -rf src' })).deny).toBeDefined()
+  expect((await $.tool.call({ tool: 'Read', file_path: '/w/.factory/branch.diff' })).deny).toBeUndefined()
+  expect((await $.tool.call({ tool: 'Bash', command: 'git diff' })).deny).toBeDefined()
   expect(reads).toBe(0)
 })
 
@@ -194,4 +254,17 @@ test('parent session: nothing is gated', async ($, on) => {
   on('tool.call', () => ({ result: 'ran' }))
   expect((await $.tool.call({ tool: 'Bash', command: 'git push' })).deny).toBeUndefined()
   expect((await $.tool.call({ tool: 'Edit', file_path: '/etc/x', old_string: 'a', new_string: 'b' })).deny).toBeUndefined()
+})
+
+test('parent session: a failing role read lets the call through (the user is never gated)', async ($, on) => {
+  on('env.get', () => ({ deny: 'env unavailable' }))
+  on('tool.call', () => ({ result: 'ran' }))
+  expect((await $.tool.call({ tool: 'Bash', command: 'git push' })).deny).toBeUndefined()
+})
+
+test('child session: Monitor with git push is denied through the hook', async ($, on) => {
+  mock.env(on, { FACTORY_ROLE: 'code-reviewer', FACTORY_WORKTREE: '/w' })
+  on('tool.call', () => ({ result: 'ran' }))
+  expect((await $.tool.call({ tool: 'Monitor', command: 'git push', description: 'x' })).deny).toBeDefined()
+  expect((await $.tool.call({ tool: 'Grep', pattern: 'x', path: '/w/src' })).deny).toBeUndefined()
 })

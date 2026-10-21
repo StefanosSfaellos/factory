@@ -58,3 +58,26 @@ export async function ensureCheckout(
   const from = remote.exitCode === 0 ? branch : base
   await git(gitArgv(dir, 'checkout', '-B', branch, `origin/${from}`))
 }
+
+/** The mod's own clone for a job (R20): cloned, fetched and pushed only by the mod, never an agent's cwd. */
+export function modDir(workDirPath: string): string {
+  return `${workDirPath}.mod`
+}
+
+/**
+ * Rebuilds an agent's working directory as a fresh copy of the mod clone (R20):
+ * whatever an earlier agent left in it (its .git/config, hooks, attributes) is
+ * discarded before the mod or the next agent uses it. `--no-hardlinks` keeps the
+ * agent from writing into the mod clone's object files through shared inodes.
+ * The only git run inside `dir` is set-url on the clone just made.
+ */
+export async function prepareWorktree(run: RunFn, opts: { mod: string; dir: string; publicUrl: string }): Promise<void> {
+  const { mod, dir, publicUrl } = opts
+  const step = async (argv: string[], what: string) => {
+    const r = await run(argv, {})
+    if (r.exitCode !== 0) throw new Error(`${what} failed (exit ${r.exitCode}): ${`${r.stderr}\n${r.stdout}`.trim()}`)
+  }
+  await step(['rm', '-rf', dir], 'removing the old agent worktree')
+  await step(gitNoDir('clone', '--no-hardlinks', '--quiet', mod, dir), 'git clone of the mod checkout')
+  await step(gitArgv(dir, 'remote', 'set-url', 'origin', publicUrl), 'git remote set-url')
+}

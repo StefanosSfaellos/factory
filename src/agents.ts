@@ -20,6 +20,8 @@ export type ChildOpts = {
   pluginRoot: string
   job: string
   worktree: string
+  /** Forge hosts the builder gate refuses curl/wget writes to (FACTORY_FORGE_HOSTS). */
+  forgeHosts?: string[]
 }
 
 const READ_ONLY: Role[] = ['code-reviewer', 'security-reviewer', 'ux-reviewer', 'approver']
@@ -27,12 +29,14 @@ const PROGRESS_MAX = 120
 
 export function childArgv(o: ChildOpts): string[] {
   const argv = [
-    'env',
+    // R18: the agent never sees the forge credentials; the mod does all forge I/O.
+    'env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL',
     `FACTORY_ROLE=${o.role}`,
     `FACTORY_JOB=${o.job}`,
     `FACTORY_WORKTREE=${o.worktree}`,
     `FACTORY_SPEC_FILE=${o.worktree}/.factory/spec.md`,
     `FACTORY_PROTECTED=${(o.cfg.protectedPaths ?? []).join(',')}`,
+    `FACTORY_FORGE_HOSTS=${(o.forgeHosts ?? []).join(',')}`,
     'claude', '-p', o.prompt,
     '--plugin-dir', o.pluginRoot,
     '--agent', `software-factory:${o.role}`,

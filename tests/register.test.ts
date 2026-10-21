@@ -160,7 +160,12 @@ test('/factory run drives a station through $.process.run and $.process.spawn', 
   expect(g.issue.notes[1].body).toBe('<!-- factory:spec -->\n## Goal\nRound VAT.')
   expect(spawned!.cwd).toBe('/home/u/.factory/work/gitlab/g__p/4')
   expect(spawned!.argv).toContain('--plugin-dir')
-  expect(argvs[0]).toEqual(['test', '-d', '/home/u/.factory/work/gitlab/g__p/4'])
+  // R20: the mod's own clone is checked first; the agent's dir is a fresh copy of it.
+  expect(argvs[0]).toEqual(['test', '-d', '/home/u/.factory/work/gitlab/g__p/4.mod'])
+  expect(argvs).toContainEqual(['rm', '-rf', '/home/u/.factory/work/gitlab/g__p/4'])
+  // R18: the child never inherits the forge token.
+  expect(spawned!.argv.slice(0, 7)).toEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL'])
+  expect(spawned!.argv).toContain('FACTORY_FORGE_HOSTS=github.com,api.github.com,uploads.github.com,gitlab.com')
   // the lease note (id 1) is edited in place at the end: released with until = now
   expect(g.reqs.some((q) => q.method === 'PUT' && q.url.includes('/notes/1'))).toBe(true)
 })
