@@ -175,3 +175,14 @@ test('custom apiUrl is honoured and detached methods work', async () => {
   expect(await whoami()).toBe('u')
   expect(calls[0].url).toBe('https://ghe.example/api/v3/user')
 })
+
+test('findOpenMR queries open pulls by owner:branch; publicUrl is tokenless', async () => {
+  const { forge, calls } = fake((r) =>
+    r.url.includes('/pulls?') ? { status: 200, json: [{ html_url: 'https://github.com/own/app/pull/9' }] } : undefined)
+  expect(await forge.findOpenMR('own/app', 'factory/7-x')).toEqual({ url: 'https://github.com/own/app/pull/9' })
+  expect(calls[0].method).toBe('GET')
+  expect(calls[0].url).toBe(`${R}/pulls?state=open&head=${encodeURIComponent('own:factory/7-x')}`)
+  expect(forge.publicUrl('own/app')).toBe('https://github.com/own/app.git')
+  const none = fake(() => ({ status: 200, json: [] }))
+  expect(await none.forge.findOpenMR('own/app', 'b')).toBe(null)
+})

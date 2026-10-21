@@ -115,3 +115,14 @@ test('comment, editComment, createIssue, whoami, cloneUrl', async () => {
   expect(await forge.createIssue('grp/app', 't', 'b')).toEqual({ forge: 'gitlab', project: 'grp/app', issue: 12 })
   expect(forge.cloneUrl('grp/app')).toBe('https://oauth2:tok@lab.ironcloud.gr/grp/app.git')
 })
+
+test('findOpenMR queries opened MRs by source branch; publicUrl is tokenless', async () => {
+  const { forge, calls } = fake((r) =>
+    r.url.includes('/merge_requests?') ? { status: 200, json: [{ web_url: 'https://lab.ironcloud.gr/grp/app/-/merge_requests/4' }] } : undefined)
+  expect(await forge.findOpenMR('grp/app', 'factory/7-x')).toEqual({ url: 'https://lab.ironcloud.gr/grp/app/-/merge_requests/4' })
+  expect(calls[0].method).toBe('GET')
+  expect(calls[0].url).toBe(`${A}/projects/grp%2Fapp/merge_requests?state=opened&source_branch=${encodeURIComponent('factory/7-x')}`)
+  expect(forge.publicUrl('grp/app')).toBe('https://lab.ironcloud.gr/grp/app.git')
+  const none = fake(() => ({ status: 200, json: [] }))
+  expect(await none.forge.findOpenMR('grp/app', 'b')).toBe(null)
+})

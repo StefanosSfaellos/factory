@@ -4,7 +4,7 @@ import type { RunFn } from '../src/worktree'
 import type { RepoConfig } from '../src/config'
 
 const cfg = { test: 'npm test', setup: 'npm ci', branchPrefix: 'factory/' } as RepoConfig
-const base = { cloneUrl: 'https://x:tok123@host/r.git', branch: 'b', scratchDir: '/s', cfg, secrets: ['tok123'] }
+const base = { cloneUrl: 'https://x:tok123@host/r.git', publicUrl: 'https://host/r.git', branch: 'b', scratchDir: '/s', cfg, secrets: ['tok123'] }
 
 function fake(h: (cmd: string) => { exitCode: number; stdout?: string; stderr?: string; timedOut?: boolean }) {
   const calls: string[][] = []
@@ -83,4 +83,19 @@ test('setup passes, test times out', async () => {
   const r = await verify(f.run, base)
   expect(r.passed).toBe(false)
   expect(r.report).toContain('timed out after 10 min')
+})
+
+test('clone is followed immediately by set-url to the tokenless url', async () => {
+  const f = fake(() => ({ exitCode: 0 }))
+  await verify(f.run, base)
+  const i = f.calls.findIndex((c) => c[1] === 'clone')
+  expect(f.calls[i + 1]).toEqual(['git', '-C', '/s', 'remote', 'set-url', 'origin', 'https://host/r.git'])
+})
+
+test('report records the tested commit sha', async () => {
+  const run: RunFn = async (argv) =>
+    argv.includes('rev-parse') ? { exitCode: 0, stdout: 'abc1234\n', stderr: '' } : { exitCode: 0, stdout: '', stderr: '' }
+  const r = await verify(run, base)
+  expect(r.sha).toBe('abc1234')
+  expect(r.report.split('\n')[0]).toBe('<!-- factory:test-report passed=true sha=abc1234 -->')
 })

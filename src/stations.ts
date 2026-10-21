@@ -15,6 +15,9 @@ import { branchName, ensureCheckout, workDir, type RunFn } from './worktree'
 // within the same advance; a second failure blocks the job. Forge errors while
 // posting the results or relabelling propagate to the caller with the label
 // unchanged; the next advance finds the posted marker and only relabels.
+// Test reports and verdicts carry the tested commit (`sha=`), so evidence is
+// tied to the branch head and re-entry never re-runs verify/review or
+// double-counts a fix loop.
 
 export type Deps = {
   forge: Forge
@@ -33,7 +36,7 @@ export type Deps = {
 
 export type AdvanceResult = { from: Station; to: Station; needsHuman: boolean }
 
-type Outcome = { posts: string[]; event: MachineEvent; failed?: Verdict[] }
+type Outcome = { posts: string[]; event: MachineEvent; failed?: Verdict[]; round?: number; approved?: string }
 
 const HUMAN: Station[] = ['awaiting-spec', 'mr-open', 'blocked']
 const REVIEWER_ROLE: Record<Reviewer, Role> = { code: 'code-reviewer', security: 'security-reviewer', ux: 'ux-reviewer' }
@@ -94,13 +97,36 @@ function failedVerdictsOfLatestRound(job: Job): { verdicts: Verdict[]; at: numbe
 const formatVerdicts = (vs: Verdict[]) =>
   vs.map((v) => `### ${v.role}: ${v.pass ? 'pass' : 'fail'}\n${v.findings.trim() || '- none'}`).join('\n\n')
 
-function latestVerdicts(job: Job): Verdict[] {
-  const byRole = new Map<string, Verdict>()
-  for (const c of [...job.comments].sort((a, b) => at(a) - at(b))) {
-    const v = parseVerdict(c)
-    if (v) byRole.set(v.role, v)
+type Posted = { c: Comment; attrs: Record<string, string> }
+const markersOf = (job: Job, kind: string): Posted[] =>
+  job.comments.flatMap((c) => { const p = parseMarker(c.body); return p?.kind === kind ? [{ c, attrs: p.attrs }] : [] })
+const newest = (xs: Posted[]): Posted | undefined => xs.reduce<Posted | undefined>((b, x) => (!b || at(x.c) >= at(b.c) ? x : b), undefined)
+const toVerdict = (x: Posted) => parseVerdict(x.c)!
+
+/** Verdicts posted after the given test report, by role (latest per role). */
+function verdictsAfter(job: Job, report: Posted, roles: Role[]): { byRole: Map<Role, Posted>; round?: string } {
+  const byRole = new Map<Role, Posted>()
+  const after = markersOf(job, 'verdict').filter((x) => at(x.c) > at(report.c) && roles.includes(x.attrs.role as Role))
+  for (const x of after.sort((a, b) => at(a.c) - at(b.c))) byRole.set(x.attrs.role as Role, x)
+  return { byRole, round: newest(after)?.attrs.round }
+}
+
+/** Deterministic approve gate: a passing report for this head and passing verdicts of the current round. */
+function approveGate(job: Job, roles: Role[], round: number, head: string | undefined): { ok: true; verdicts: Verdict[] } | { ok: false; why: string } {
+  const report = newest(markersOf(job, 'test-report'))
+  if (!report || report.attrs.passed !== 'true') return { ok: false, why: 'the latest test report is missing or failing' }
+  const lastFail = newest(markersOf(job, 'verdict').filter((x) => x.attrs.pass === 'false'))
+  if (lastFail && at(lastFail.c) >= at(report.c)) return { ok: false, why: 'a failing verdict is newer than the latest passing test report' }
+  if (head && report.attrs.sha && report.attrs.sha !== head) return { ok: false, why: `the branch head ${head} is not the verified commit ${report.attrs.sha}` }
+  const inRound = markersOf(job, 'verdict').filter((x) => x.attrs.round === String(round) && at(x.c) > at(report.c))
+  if (inRound.some((x) => x.attrs.pass !== 'true')) return { ok: false, why: `a verdict in round ${round} failed` }
+  const verdicts: Verdict[] = []
+  for (const role of roles) {
+    const mine = inRound.filter((x) => x.attrs.role === role && (!head || !x.attrs.sha || x.attrs.sha === head))
+    if (mine.length === 0) return { ok: false, why: `no passing ${role} verdict in round ${round} for the verified commit` }
+    verdicts.push(toVerdict(newest(mine)!))
   }
-  return [...byRole.values()]
+  return { ok: true, verdicts }
 }
 
 export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
@@ -108,6 +134,7 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
   const me = await forge.whoami()
   const job = trustedView(await forge.getJob(ref), me)
   const cloneUrl = forge.cloneUrl(ref.project)
+  const publicUrl = forge.publicUrl(ref.project)
   const secrets = [...deps.secrets, cloneUrl]
   const clean = (t: string) => redact(t, secrets)
 
@@ -152,9 +179,12 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
 
   const checkout = async (): Promise<string> => {
     const base = await forge.defaultBranch(ref.project)
-    await ensureCheckout(deps.run, { dir, cloneUrl, branch, base, secrets: deps.secrets })
+    await ensureCheckout(deps.run, { dir, cloneUrl, publicUrl, branch, base, secrets: deps.secrets })
     return base
   }
+  const shaOf = (out: string) => { const m = /^([0-9a-f]{7,64})\b/.exec(out.trim()); return m ? m[1] : undefined }
+  const headSha = async () => shaOf((await deps.run(['git', '-C', dir, 'rev-parse', 'HEAD'], {})).stdout)
+  const remoteSha = async () => shaOf((await deps.run(['git', 'ls-remote', cloneUrl, `refs/heads/${branch}`], {})).stdout)
   const agent = async (role: Role, artifacts: Record<string, string>): Promise<string> => {
     const r = await runAgent(deps.spawn, {
       role, prompt: promptFor(from, role, job, artifacts), cfg, pluginRoot: deps.pluginRoot, job: jobId, worktree: dir,
@@ -202,56 +232,95 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
         const out = await agent('builder', a)
         const lines = out.split('\n').map((l) => l.trim()).filter((l) => l !== '')
         if (lines[lines.length - 1] !== 'BUILD-DONE') throw new Error(`builder did not finish (no BUILD-DONE): ${lines.slice(-5).join(' / ')}`)
-        await runOk(['git', '-C', dir, 'push', '-u', 'origin', branch], 'git push')
+        // A fix loop must move the branch, or verify/review re-entry could not tell it from a retry.
+        const lastFail = newest([...markersOf(job, 'test-report').filter((x) => x.attrs.passed === 'false'), ...markersOf(job, 'verdict').filter((x) => x.attrs.pass === 'false')])
+        const sha = await headSha()
+        if (ctx.fixLoops > 0 && lastFail?.attrs.sha && lastFail.attrs.sha === sha) throw new Error(`builder made no new commits since the failed round (head ${sha})`)
+        await runOk(['git', '-C', dir, 'push', cloneUrl, `HEAD:refs/heads/${branch}`], 'git push')
         return { posts: [], event: { kind: 'build-done' } }
       }
       case 'verify': {
-        const r = await verify(deps.run, { cloneUrl, branch, scratchDir: `${dir}.verify`, cfg, secrets: deps.secrets })
+        const r = await verify(deps.run, { cloneUrl, publicUrl, branch, scratchDir: `${dir}.verify`, cfg, secrets: deps.secrets })
         return { posts: [r.report], event: { kind: 'verify', passed: r.passed } }
       }
       case 'review': {
         const baseBranch = await checkout()
+        const sha = await headSha()
         const a = { ...base, report: art('test-report') ?? '', base: baseBranch }
-        const verdicts = await Promise.all(ctx.requiredReviewers.map(async (role): Promise<Verdict> => {
+        const settled = await Promise.allSettled(ctx.requiredReviewers.map(async (role): Promise<Verdict> => {
           const out = await agent(role, a)
           const m = /^VERDICT:\s*(pass|fail)$/i.exec(firstLine(out))
           if (!m) throw new Error(`${role} output did not start with "VERDICT: pass|fail": ${firstLine(out).slice(0, 200)}`)
           return { role, pass: m[1].toLowerCase() === 'pass', findings: afterFirstLine(out) }
         }))
+        const errors = settled.flatMap((x) => (x.status === 'rejected' ? [errText(x.reason)] : []))
+        if (errors.length > 0) throw new Error(errors.join('; '))
+        const verdicts = settled.flatMap((x) => (x.status === 'fulfilled' ? [x.value] : []))
         return {
-          posts: verdicts.map((v) => verdictComment(v, ctx.fixLoops)),
+          posts: verdicts.map((v) => verdictComment(v, ctx.fixLoops, sha)),
           event: { kind: 'verdicts', verdicts },
           failed: verdicts.filter((v) => !v.pass),
         }
       }
       case 'approve': {
-        await checkout()
-        const verdicts = formatVerdicts(latestVerdicts(job))
+        const verdicts = formatVerdicts(gateVerdicts)
         const report = art('test-report') ?? ''
         const out = await agent('approver', { spec: base.spec, report, verdicts })
         const head = firstLine(out)
         const rej = /^REJECT:\s*(.*)$/.exec(head)
         if (rej) {
           const v: Verdict = { role: 'approver', pass: false, findings: [`- ${rej[1].trim() || 'rejected'}`, afterFirstLine(out)].filter(Boolean).join('\n\n') }
-          return { posts: [verdictComment(v, ctx.fixLoops)], event: { kind: 'verdicts', verdicts: [v] }, failed: [v] }
+          return { posts: [verdictComment(v, ctx.fixLoops, gateSha)], event: { kind: 'verdicts', verdicts: [v] }, failed: [v] }
         }
         if (head !== 'APPROVE') throw new Error(`approver output did not start with APPROVE or REJECT: ${head.slice(0, 200)}`)
-        const summary = afterFirstLine(out)
-        const body = clean(mrBody(job, { summary, ...base, report, verdicts }))
-        const mr = await forge.openMR(ref, branch, `${job.title} (#${ref.issue})`, body)
-        return { posts: [`${marker('approval', { mr: mr.url })}\n${summary}`], event: { kind: 'mr-opened' } }
+        return { posts: [], event: { kind: 'mr-opened' }, approved: afterFirstLine(out) }
       }
       default:
         return { posts: [], event: { kind: 'picked' } }
     }
   }
 
-  // Idempotent re-entry: the artifact is already posted, only the relabel is missing.
+  // Idempotent re-entry: the station's output is already posted, only the relabel is missing.
   const kindOf: Partial<Record<Station, string>> = { spec: 'spec', design: 'design', plan: 'plan', approve: 'approval' }
   const kind = kindOf[from]
   if (kind && alreadyPosted(job, kind)) {
     const ev: MachineEvent = from === 'approve' ? { kind: 'mr-opened' } : { kind: 'artifact-posted' }
     return commit(from, next(from, ev, ctx).station, [])
+  }
+  const report = newest(markersOf(job, 'test-report'))
+  const settle = (o: Outcome) => finish({ ...o, posts: [] }, true)
+  if (from === 'verify' && report?.attrs.sha) {
+    const sha = await remoteSha()
+    const lastFail = newest(markersOf(job, 'verdict').filter((x) => x.attrs.pass === 'false'))
+    if (sha === report.attrs.sha && (!lastFail || at(report.c) > at(lastFail.c))) {
+      const passed = report.attrs.passed === 'true'
+      // A posted failing report is already counted by fixLoopsOf.
+      return settle({ posts: [], event: { kind: 'verify', passed }, round: passed ? ctx.fixLoops : ctx.fixLoops - 1 })
+    }
+  }
+  if (from === 'review' && report) {
+    const { byRole, round } = verdictsAfter(job, report, ctx.requiredReviewers)
+    if (round !== undefined && ctx.requiredReviewers.every((r) => byRole.get(r)?.attrs.round === round)) {
+      const verdicts = [...byRole.values()].map(toVerdict)
+      return settle({ posts: [], event: { kind: 'verdicts', verdicts }, failed: verdicts.filter((v) => !v.pass), round: Number(round) })
+    }
+  }
+  let gateVerdicts: Verdict[] = []
+  let gateSha: string | undefined
+  if (from === 'approve') {
+    const rej = report && verdictsAfter(job, report, ['approver']).byRole.get('approver')
+    if (rej && rej.attrs.pass === 'false') {
+      const v = toVerdict(rej)
+      return settle({ posts: [], event: { kind: 'verdicts', verdicts: [v] }, failed: [v], round: Number(rej.attrs.round) })
+    }
+    await checkout()
+    gateSha = await headSha()
+    const gate = approveGate(job, ctx.requiredReviewers, ctx.fixLoops, gateSha)
+    if (!gate.ok) return block(from, `Refusing to run the approver: ${gate.why}. Relabel to \`factory::build\` or \`factory::verify\` to produce fresh evidence.`)
+    gateVerdicts = gate.verdicts
+    // An MR opened by an earlier advance whose approval comment failed: record it, never open a second.
+    const open = await forge.findOpenMR(ref.project, branch)
+    if (open) return commit(from, 'mr-open', [`${marker('approval', { mr: open.url })}\nMerge request already open for \`${branch}\`.`])
   }
 
   let outcome: Outcome
@@ -266,13 +335,25 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
     }
   }
 
-  // The approver's REJECT is a failed review round: reuse the review transition.
-  const machineStation: Station = from === 'approve' && outcome.event.kind === 'verdicts' ? 'review' : from
-  const out = next(machineStation, outcome.event, ctx)
-  const posts = [...outcome.posts]
-  if (out.station === 'blocked') {
-    const findings = outcome.failed && outcome.failed.length > 0 ? `\n\n${formatVerdicts(outcome.failed)}` : ''
-    posts.push(`${marker('blocked', { station: from })}\n${out.reason ?? 'blocked'}${findings}`)
+  if (outcome.approved !== undefined) {
+    // Outside the retried step: never open a second MR for the same branch.
+    const summary = outcome.approved
+    const mr = await forge.openMR(ref, branch, `${job.title} (#${ref.issue})`,
+      clean(mrBody(job, { summary, ...base, report: art('test-report') ?? '', verdicts: formatVerdicts(gateVerdicts) })))
+    outcome.posts.push(`${marker('approval', { mr: mr.url })}\n${summary}`)
   }
-  return commit(from, out.station, posts)
+  return finish(outcome, false)
+
+  async function finish(o: Outcome, reentry: boolean): Promise<AdvanceResult> {
+    // The approver's REJECT is a failed review round: reuse the review transition.
+    const machineStation: Station = from === 'approve' && o.event.kind === 'verdicts' ? 'review' : from
+    const out = next(machineStation, o.event, { ...ctx, fixLoops: o.round ?? ctx.fixLoops })
+    const posts = [...o.posts]
+    const blockedPosted = reentry && report && markersOf(job, 'blocked').some((x) => at(x.c) > at(report.c))
+    if (out.station === 'blocked' && !blockedPosted) {
+      const findings = o.failed && o.failed.length > 0 ? `\n\n${formatVerdicts(o.failed)}` : ''
+      posts.push(`${marker('blocked', { station: from })}\n${out.reason ?? 'blocked'}${findings}`)
+    }
+    return commit(from, out.station, posts)
+  }
 }

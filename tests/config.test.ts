@@ -55,3 +55,9 @@ test('modelFor', () => {
   expect(modelFor('spec-writer', a.config)).toBe('opus')
   expect(modelFor('builder', b.config)).toBe('opus')
 })
+
+test('empty reviewers list is rejected', () => {
+  const r = parseRepoConfig('forge: github\ntest: x\nreviewers: []\n')
+  expect(r.ok).toBe(false)
+  if (!r.ok) expect(r.error).toContain('reviewers')
+})

@@ -27,7 +27,7 @@ function fake(exists: boolean, remoteBranch: boolean, failOn?: string) {
   }
   return { run, calls }
 }
-const o = { dir: '/d', cloneUrl: 'https://x:tok123@host/r.git', branch: 'factory/1-a', base: 'main' }
+const o = { dir: '/d', cloneUrl: 'https://x:tok123@host/r.git', publicUrl: 'https://host/r.git', branch: 'factory/1-a', base: 'main' }
 
 test('clones only when missing', async () => {
   const f = fake(false, false)
@@ -37,7 +37,7 @@ test('clones only when missing', async () => {
   const g = fake(true, true)
   await ensureCheckout(g.run, o)
   expect(g.calls.some((c) => c[1] === 'clone')).toBe(false)
-  expect(g.calls.some((c) => c.join(' ') === 'git -C /d fetch origin')).toBe(true)
+  expect(g.calls.some((c) => c.join(' ') === 'git -C /d fetch https://x:tok123@host/r.git +refs/heads/*:refs/remotes/origin/*')).toBe(true)
   expect(g.calls.some((c) => c.join(' ') === 'git -C /d checkout -B factory/1-a origin/factory/1-a')).toBe(true)
 })
 test('errors never include the clone url', async () => {
@@ -61,4 +61,12 @@ test('extra secrets redacted in checkout errors', async () => {
   try { await ensureCheckout(run, { ...o, secrets: ['SECRETX'] }) } catch (e) { msg = (e as Error).message }
   expect(msg).toContain('auth failed')
   expect(msg.includes('SECRETX')).toBe(false)
+})
+
+test('clone is followed immediately by set-url to the tokenless url', async () => {
+  const f = fake(false, false)
+  await ensureCheckout(f.run, o)
+  const i = f.calls.findIndex((c) => c[1] === 'clone')
+  expect(f.calls[i + 1]).toEqual(['git', '-C', '/d', 'remote', 'set-url', 'origin', 'https://host/r.git'])
+  expect(f.calls.some((c) => c.includes('fetch') && c.includes('origin'))).toBe(false)
 })

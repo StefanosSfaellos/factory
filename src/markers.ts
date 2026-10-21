@@ -33,8 +33,10 @@ export function findLatest(comments: Comment[], kind: string): Comment | undefin
   return best
 }
 
-export function verdictComment(v: Verdict, round: number): string {
-  const head = marker('verdict', { role: v.role, pass: String(v.pass), round: String(round) })
+export function verdictComment(v: Verdict, round: number, sha?: string): string {
+  const attrs: Record<string, string> = { role: v.role, pass: String(v.pass), round: String(round) }
+  if (sha) attrs.sha = sha
+  const head = marker('verdict', attrs)
   return v.findings === '' ? head : `${head}\n${v.findings}`
 }
 

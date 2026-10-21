@@ -48,3 +48,8 @@ test('parseVerdict rejects non-verdicts and bad attrs', () => {
   expect(parseVerdict(c('1', '<!-- factory:verdict role=code-reviewer pass=maybe -->', 't'))).toBeNull()
   expect(parseVerdict(c('1', '<!-- factory:verdict pass=true -->', 't'))).toBeNull()
 })
+
+test('verdictComment records an optional sha', () => {
+  expect(verdictComment({ role: 'code-reviewer', pass: true, findings: '' }, 2, 'abc1234'))
+    .toBe('<!-- factory:verdict role=code-reviewer pass=true round=2 sha=abc1234 -->')
+})

@@ -124,6 +124,16 @@ export function gitlabForge(http: HttpFn, opts: { baseUrl: string; token: string
       return `https://oauth2:${opts.token}@${host}/${project}.git`
     },
 
+    publicUrl(project) {
+      return `${root}/${project}.git`
+    },
+
+    async findOpenMR(project, branch) {
+      const mrs = await call('GET', `/projects/${pid(project)}/merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}`)
+      const mr = Array.isArray(mrs) ? mrs[0] : undefined
+      return mr && typeof mr.web_url === 'string' ? { url: mr.web_url } : null
+    },
+
     async whoami() {
       const u = await call('GET', '/user')
       return u.username

@@ -17,6 +17,10 @@ export interface Forge {
   openMR(ref: JobRef, branch: string, title: string, body: string): Promise<{ url: string }>
   defaultBranch(project: string): Promise<string>
   cloneUrl(project: string): string
+  /** Tokenless https clone URL, safe to leave as a checkout's `origin`. */
+  publicUrl(project: string): string
+  /** The open MR/PR whose source is `branch`, if any. */
+  findOpenMR(project: string, branch: string): Promise<{ url: string } | null>
   /** Username of the account the token belongs to. */
   whoami(): Promise<string>
 }

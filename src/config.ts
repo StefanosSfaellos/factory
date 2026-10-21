@@ -69,6 +69,7 @@ export function parseRepoConfig(text: string): Result {
     if (raw.setup !== undefined && typeof raw.setup !== 'string') throw new Error('setup must be a string')
 
     const reviewers = raw.reviewers === undefined ? (['code', 'security'] as Reviewer[]) : strList(raw.reviewers, 'reviewers')
+    if (reviewers.length === 0) throw new Error('reviewers must list at least one of code, security, ux')
     for (const r of reviewers) if (!REVIEWERS.includes(r as Reviewer)) throw new Error(`unknown reviewer "${r}" (expected code, security or ux)`)
 
     const models: Partial<Record<Role, string>> = {}

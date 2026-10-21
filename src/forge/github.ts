@@ -127,6 +127,17 @@ export function githubForge(http: HttpFn, opts: { token: string; apiUrl?: string
       return `https://x-access-token:${opts.token}@github.com/${project}.git`
     },
 
+    publicUrl(project) {
+      return `https://github.com/${project}.git`
+    },
+
+    async findOpenMR(project, branch) {
+      const owner = project.split('/')[0]
+      const prs = await call('GET', `${repo(project)}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`)
+      const pr = Array.isArray(prs) ? prs[0] : undefined
+      return pr && typeof pr.html_url === 'string' ? { url: pr.html_url } : null
+    },
+
     async whoami() {
       const u = await call('GET', '/user')
       return u.login

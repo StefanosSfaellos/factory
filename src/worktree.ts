@@ -22,9 +22,9 @@ export function workDir(root: string, ref: JobRef): string {
 
 export async function ensureCheckout(
   run: RunFn,
-  opts: { dir: string; cloneUrl: string; branch: string; base: string; secrets?: string[] },
+  opts: { dir: string; cloneUrl: string; publicUrl: string; branch: string; base: string; secrets?: string[] },
 ): Promise<void> {
-  const { dir, cloneUrl, branch, base } = opts
+  const { dir, cloneUrl, publicUrl, branch, base } = opts
   const secrets = [...(opts.secrets ?? []), cloneUrl]
   const git = async (argv: string[]): Promise<{ exitCode: number }> => {
     const r = await run(argv, {})
@@ -36,7 +36,9 @@ export async function ensureCheckout(
   }
   const exists = (await run(['test', '-d', dir], {})).exitCode === 0
   if (!exists) await git(['git', 'clone', cloneUrl, dir])
-  await git(['git', '-C', dir, 'fetch', 'origin'])
+  // Never leave the token in the checkout: agents and test commands run here.
+  await git(['git', '-C', dir, 'remote', 'set-url', 'origin', publicUrl])
+  await git(['git', '-C', dir, 'fetch', cloneUrl, '+refs/heads/*:refs/remotes/origin/*'])
   const remote = await run(['git', '-C', dir, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`], {})
   const from = remote.exitCode === 0 ? branch : base
   await git(['git', '-C', dir, 'checkout', '-B', branch, `origin/${from}`])
