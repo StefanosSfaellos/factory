@@ -1,0 +1,25 @@
+# Add the last step to your existing CI job, after the step that can fail.
+# Copy ci/factory-intake.mjs to `.factory-intake.mjs` at the repo root (the README explains how).
+# GITHUB_TOKEN needs `issues: write`.
+name: CI
+on: [push]
+permissions:
+  contents: read
+  issues: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: npm test 2>&1 | tee ci-failure.log
+        shell: bash   # bash -e -o pipefail: a failing test keeps the step failing
+      - name: Open a factory issue
+        if: failure() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        env:
+          FORGE: github
+          PROJECT: ${{ github.repository }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JOB_NAME: ${{ github.job }}
+          LOG_FILE: ci-failure.log
+        run: node .factory-intake.mjs

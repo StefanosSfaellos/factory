@@ -1,0 +1,39 @@
+{
+  "name": "software-factory",
+  "version": "0.1.0",
+  "author": { "name": "Claude", "email": "st.sfaellos@gmail.com" },
+  "description": "Multi-agent build pipeline that turns GitHub/GitLab issues into merge requests",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "repos": {
+      "type": "string",
+      "title": "Repositories",
+      "description": "Comma-separated list of repos to work, e.g. github:owner/name,gitlab:group/name",
+      "default": ""
+    },
+    "workerId": {
+      "type": "string",
+      "title": "Worker id",
+      "description": "Identifier this worker uses when taking leases; left as \"worker\", each session uses <host>-<random>",
+      "default": "worker"
+    },
+    "tickMinutes": {
+      "type": "number",
+      "title": "Tick interval (minutes)",
+      "description": "How often the worker polls the forges",
+      "default": 10
+    },
+    "parallel": {
+      "type": "number",
+      "title": "Parallel jobs",
+      "description": "Global cap on how many jobs one tick leases and advances at once",
+      "default": 2
+    },
+    "slackWebhook": {
+      "type": "string",
+      "title": "Slack webhook",
+      "description": "Optional Slack incoming-webhook URL for notifications",
+      "default": ""
+    }
+  }
+}
