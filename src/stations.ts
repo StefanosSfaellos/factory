@@ -69,7 +69,7 @@ function alreadyPosted(job: Job, kind: string): boolean {
   let latest: Comment | undefined
   let cmdAt = -Infinity
   for (const c of job.comments) {
-    if (COMMAND.test(c.body.trim())) cmdAt = Math.max(cmdAt, at(c))
+    if (c.trusted !== false && COMMAND.test(c.body.trim())) cmdAt = Math.max(cmdAt, at(c))
     const p = parseMarker(c.body)
     if (!p || p.kind === 'lease') continue
     if (!latest || at(c) >= at(latest)) latest = c
