@@ -101,8 +101,32 @@ test('fixLoopsOf counts failed verdicts and test reports', () => {
     c('2', '<!-- factory:verdict role=code-reviewer pass=true -->', 't2'),
     c('3', '<!-- factory:test-report passed=false exit=1 -->', 't3'),
     c('4', '<!-- factory:test-report passed=true exit=0 -->', 't4'),
-    c('5', 'mentions <!-- factory:verdict pass=false --> not first line'.replace('mentions ', 'hello\n'), 't5'),
+    c('5', 'hello\n<!-- factory:verdict pass=false -->', 't5'),
+    c('7', '<!-- factory:verdicts pass=false -->', 't7'),
     c('6', '<!-- factory:spec -->', 't6'),
   ])
   expect(fixLoopsOf(j)).toBe(2)
+})
+
+test('fixLoopsOf counts review rounds once', () => {
+  const j = job([], [
+    c('1', '<!-- factory:verdict role=code-reviewer pass=false round=1 -->', 't1'),
+    c('2', '<!-- factory:verdict role=security-reviewer pass=false round=1 -->', 't2'),
+  ])
+  expect(fixLoopsOf(j)).toBe(1)
+})
+test('fixLoopsOf rounds plus test reports', () => {
+  const j = job([], [
+    c('1', '<!-- factory:verdict role=code-reviewer pass=false round=1 -->', 't1'),
+    c('2', '<!-- factory:verdict role=code-reviewer pass=false round=2 -->', 't2'),
+    c('3', '<!-- factory:test-report passed=false -->', 't3'),
+  ])
+  expect(fixLoopsOf(j)).toBe(3)
+})
+test('specDecision ignores untrusted /approve', () => {
+  const j = job([], [
+    c('1', '<!-- factory:spec -->', '2026-01-01T00:00:00Z'),
+    { ...c('2', '/approve', '2026-01-02T00:00:00Z'), trusted: false },
+  ])
+  expect(specDecision(j)).toEqual({ none: true })
 })

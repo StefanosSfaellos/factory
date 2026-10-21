@@ -1,10 +1,6 @@
 import type { Role } from './config'
+import { STATIONS } from './types'
 import type { Job, Station, Verdict } from './types'
-
-const STATIONS: Station[] = [
-  'ready', 'spec', 'awaiting-spec', 'design', 'plan', 'build',
-  'verify', 'review', 'approve', 'mr-open', 'done', 'blocked',
-]
 const PREFIX = 'factory::'
 
 export function stationOf(job: Job): { station: Station } | { invalid: string } {
@@ -12,7 +8,7 @@ export function stationOf(job: Job): { station: Station } | { invalid: string } 
   if (found.length === 0) return { invalid: 'no factory:: station label found' }
   if (found.length > 1) return { invalid: `multiple station labels found: ${found.join(', ')}` }
   const name = found[0].slice(PREFIX.length)
-  if (!STATIONS.includes(name as Station)) return { invalid: `unknown station label: ${found[0]}` }
+  if (!(STATIONS as readonly string[]).includes(name)) return { invalid: `unknown station label: ${found[0]}` }
   return { station: name as Station }
 }
 
@@ -88,6 +84,7 @@ export function specDecision(
   let best: { at: number; body: string } | null = null
   for (const c of job.comments) {
     const body = c.body.trim()
+    if (c.trusted === false) continue
     if (!/^\/(approve|revise)(\s|$)/.test(body)) continue
     const at = t(c.createdAt)
     if (!(at > specAt)) continue
@@ -100,12 +97,19 @@ export function specDecision(
   return { approve: false, notes }
 }
 
+const VERDICT_MARKER = /^<!-- factory:verdict(\s|-->)/
+const REPORT_MARKER = /^<!-- factory:test-report(\s|-->)/
+
 export function fixLoopsOf(job: Job): number {
   let n = 0
+  const rounds = new Set<string>()
   for (const c of job.comments) {
     const line = firstLine(c.body)
-    if (line.startsWith('<!-- factory:verdict') && /\bpass=false\b/.test(line)) n++
-    else if (line.startsWith('<!-- factory:test-report') && /\bpassed=false\b/.test(line)) n++
+    if (VERDICT_MARKER.test(line) && /\bpass=false\b/.test(line)) {
+      const m = /\bround=(\S+)/.exec(line)
+      if (m) rounds.add(m[1])
+      else n++
+    } else if (REPORT_MARKER.test(line) && /\bpassed=false\b/.test(line)) n++
   }
-  return n
+  return n + rounds.size
 }
