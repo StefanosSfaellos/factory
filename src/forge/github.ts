@@ -142,5 +142,17 @@ export function githubForge(http: HttpFn, opts: { token: string; apiUrl?: string
       const u = await call('GET', '/user')
       return u.login
     },
+
+    async readFile(project, path, ref) {
+      const p = `${repo(project)}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(ref)}`
+      const res = await http({
+        url: api + p,
+        method: 'GET',
+        headers: { Authorization: `Bearer ${opts.token}`, Accept: 'application/vnd.github.raw', 'X-GitHub-Api-Version': '2022-11-28' },
+      })
+      if (res.status === 404) return null
+      if (res.status < 200 || res.status >= 300) throw new ForgeError(res.status, `GitHub GET ${p} failed: ${res.status}`)
+      return res.text
+    },
   }
 }

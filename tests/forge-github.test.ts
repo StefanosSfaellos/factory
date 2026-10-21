@@ -186,3 +186,20 @@ test('findOpenMR queries open pulls by owner:branch; publicUrl is tokenless', as
   const none = fake(() => ({ status: 200, json: [] }))
   expect(await none.forge.findOpenMR('own/app', 'b')).toBe(null)
 })
+
+test('readFile GETs raw contents at a ref; 404 -> null; other errors throw', async () => {
+  const { forge, calls } = fake((r) =>
+    r.url.includes('/contents/') ? { status: 200, text: 'forge: github\ntest: "npm test"\n' } : undefined)
+  expect(await forge.readFile('own/app', 'ci/.factory.yml', 'release/1')).toBe('forge: github\ntest: "npm test"\n')
+  expect(calls[0].method).toBe('GET')
+  expect(calls[0].url).toBe(`${R}/contents/ci/.factory.yml?ref=release%2F1`)
+  expect(calls[0].headers.Accept).toBe('application/vnd.github.raw')
+  expect(calls[0].headers.Authorization).toBe('Bearer tok')
+  const missing = fake(() => ({ status: 404, json: { message: 'Not Found' } }))
+  expect(await missing.forge.readFile('own/app', '.factory.yml', 'main')).toBe(null)
+  const broken = fake(() => ({ status: 403, text: 'rate limited' }))
+  let err: unknown
+  try { await broken.forge.readFile('own/app', '.factory.yml', 'main') } catch (e) { err = e }
+  expect(err).toBeInstanceOf(ForgeError)
+  expect((err as ForgeError).status).toBe(403)
+})

@@ -8,13 +8,14 @@ type Req = Parameters<HttpFn>[0]
 const BASE = 'https://lab.ironcloud.gr'
 const A = `${BASE}/api/v4`
 
-function fake(routes: (req: Req) => { status?: number; json?: unknown } | undefined) {
+function fake(routes: (req: Req) => { status?: number; json?: unknown; text?: string } | undefined) {
   const calls: Req[] = []
   const http: HttpFn = async (req) => {
     calls.push(req)
     const r = routes(req)
     const status = r?.status ?? 404
-    return { status, ok: status >= 200 && status < 300, text: r?.json === undefined ? '' : JSON.stringify(r.json) }
+    const text = r?.text ?? (r?.json === undefined ? '' : JSON.stringify(r.json))
+    return { status, ok: status >= 200 && status < 300, text }
   }
   return { calls, forge: gitlabForge(http, { baseUrl: BASE, token: 'tok' }) }
 }
@@ -125,4 +126,20 @@ test('findOpenMR queries opened MRs by source branch; publicUrl is tokenless', a
   expect(forge.publicUrl('grp/app')).toBe('https://lab.ironcloud.gr/grp/app.git')
   const none = fake(() => ({ status: 200, json: [] }))
   expect(await none.forge.findOpenMR('grp/app', 'b')).toBe(null)
+})
+
+test('readFile GETs the raw file at a ref; 404 -> null; other errors throw', async () => {
+  const { forge, calls } = fake((r) =>
+    r.url.includes('/repository/files/') ? { status: 200, text: 'forge: gitlab\ntest: "npm test"\n' } : undefined)
+  expect(await forge.readFile('grp/app', 'ci/.factory.yml', 'main')).toBe('forge: gitlab\ntest: "npm test"\n')
+  expect(calls[0].method).toBe('GET')
+  expect(calls[0].url).toBe(`${A}/projects/grp%2Fapp/repository/files/ci%2F.factory.yml/raw?ref=main`)
+  expect(calls[0].headers['PRIVATE-TOKEN']).toBe('tok')
+  const missing = fake(() => ({ status: 404, json: { message: '404 File Not Found' } }))
+  expect(await missing.forge.readFile('grp/app', '.factory.yml', 'main')).toBe(null)
+  const broken = fake(() => ({ status: 500, text: 'oops' }))
+  let err: unknown
+  try { await broken.forge.readFile('grp/app', '.factory.yml', 'main') } catch (e) { err = e }
+  expect(err).toBeInstanceOf(ForgeError)
+  expect((err as ForgeError).status).toBe(500)
 })

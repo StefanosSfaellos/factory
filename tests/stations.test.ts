@@ -76,6 +76,7 @@ function setup(station: string, comments: Comment[] = [], opts: {
     defaultBranch: async () => 'main',
     cloneUrl: () => `https://oauth2:${SECRET}@host/g/p.git`,
     whoami: async () => ME,
+    readFile: async () => null,
   }
   const prompts: Record<string, string[]> = {}
   const cwds: Record<string, string[]> = {}

@@ -138,5 +138,13 @@ export function gitlabForge(http: HttpFn, opts: { baseUrl: string; token: string
       const u = await call('GET', '/user')
       return u.username
     },
+
+    async readFile(project, path, ref) {
+      const p = `/projects/${pid(project)}/repository/files/${encodeURIComponent(path)}/raw?ref=${encodeURIComponent(ref)}`
+      const res = await http({ url: api + p, method: 'GET', headers: { 'PRIVATE-TOKEN': opts.token } })
+      if (res.status === 404) return null
+      if (res.status < 200 || res.status >= 300) throw new ForgeError(res.status, `GitLab GET ${p} failed: ${res.status}`)
+      return res.text
+    },
   }
 }
