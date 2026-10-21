@@ -308,3 +308,36 @@ test('R23: /proc is denied for reads and in builder shell commands', () => {
   ]) expect(denied(gate(bash(c), ctx('builder')))).toBe(true)
   expect(gate(bash('npm test -- --env=node'), ctx('builder'))).toEqual({ allow: true })
 })
+
+// ---- Task 10 fix round 4 ----
+test('fix4: builder shell allows "environment" and project proc/ paths, denies /proc and environ', () => {
+  for (const c of [
+    'pytest tests/test_environment.py', 'npm test -- --environment=ci', 'cat config/environments/test.rb', 'cat src/proc/handler.c',
+    'make -C src/proc', 'ls ./proc/x',
+  ]) expect(gate(bash(c), ctx('builder'))).toEqual({ allow: true })
+  for (const c of [
+    'cat /proc/1/environ', 'cd /proc && cat self/environ', 'strings /proc/$PPID/environ', 'cat "/pr"oc/1/environ',
+    'ls /proc', 'xargs -0 < /proc/self/environ', 'cat x=/proc/1/cmdline', 'cat environ', 'cat ./environ',
+    'cd /proc/self; cat environ', 'cat /p{r,}oc/1/cmdline',
+  ]) expect(denied(gate(bash(c), ctx('builder')))).toBe(true)
+})
+
+test('fix4: ps denies only BSD-style e flags', () => {
+  for (const c of ['ps -o pid,user,time', 'ps -ef', 'ps aux', 'ps -p 1 -o comm', 'ps -e', 'ps --sort=-pcpu'])
+    expect(gate(bash(c), ctx('builder'))).toEqual({ allow: true })
+  for (const c of ['ps eww', 'ps aux e', 'ps axe', 'ps e', 'ps auxeww'])
+    expect(denied(gate(bash(c), ctx('builder')))).toBe(true)
+})
+
+test('fix4: worktree containment is case-sensitive; .git/.factory checks stay case-insensitive', () => {
+  for (const role of ['builder', 'code-reviewer'] as Role[]) {
+    expect(denied(gate({ tool: 'Read', input: { file_path: '/W/x' } }, ctx(role)))).toBe(true)
+    expect(denied(gate({ tool: 'LS', input: { path: '/W' } }, ctx(role)))).toBe(true)
+    expect(gate({ tool: 'Read', input: { file_path: '/w/Src/A.php' } }, ctx(role))).toEqual({ allow: true })
+    expect(denied(gate({ tool: 'Read', input: { file_path: '/PROC/1/environ' } }, ctx(role, { worktree: '/' })))).toBe(true)
+    expect(denied(gate({ tool: 'Read', input: { file_path: '/w/.GIT/config' } }, ctx(role)))).toBe(true)
+  }
+  expect(denied(gate(edit('/W/x'), ctx('builder')))).toBe(true)
+  expect(denied(gate(edit('/w/.GIT/hooks/pre-commit'), ctx('builder')))).toBe(true)
+  expect(denied(gate(edit('/w/.Factory/x'), ctx('builder')))).toBe(true)
+})

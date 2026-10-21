@@ -207,6 +207,8 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
     const bytes = new Uint8Array(6)
     crypto.getRandomValues(bytes)
     const bare = `${dir}.bare-${[...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')}`
+    // Exclusive: mkdir fails if the path exists, so nobody else's directory is used (or removed).
+    await runOk(['mkdir', '-m', '700', bare], 'creating the bare repo directory')
     try {
       await runOk(gitNoDir('init', '--bare', '--quiet', bare), 'git init --bare')
       return await fn(bare)

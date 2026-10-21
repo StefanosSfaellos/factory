@@ -24,7 +24,7 @@ test('passes on exit 0', async () => {
   expect(r.passed).toBe(true)
   expect(r.report.split('\n')[0]).toBe('<!-- factory:test-report passed=true -->')
   expect(f.calls[0]).toEqual(['rm', '-rf', '/s'])
-  expect(f.calls[1]).toEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', 'clone', '--depth', '1', '--branch', 'b', base.cloneUrl, '/s'])
+  expect(f.calls[1]).toEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/', 'clone', '--depth', '1', '--branch', 'b', base.cloneUrl, '/s'])
 })
 test('fails on exit 1 with log tail', async () => {
   const lines = Array.from({ length: 100 }, (_, i) => 'line' + i).join('\n')

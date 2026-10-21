@@ -150,7 +150,9 @@ const HTTP_CLIS = new Set(['curl', 'wget', 'http', 'https', 'xh'])
 function builderShell(cmd: string, ctx: GateCtx): GateResult {
   // R23: /proc/<pid>/environ of the parent mod process holds the forge token.
   const f = flatten(cmd)
-  if (/\/proc\//.test(f) || /\/proc$/.test(f) || /environ/.test(f) || /(^|[\s;|&(])(cd|pushd)\s+\/proc\b/.test(f)) {
+  // `/proc` only as an absolute path at a word start (not `src/proc/x`), `environ`
+  // only as a word (not `environment`).
+  if (/(^|[\s=:'"(<>;|&])\/proc(?=[/\s;|&)<>]|$)/.test(f) || /\benviron\b/.test(f)) {
     return deny('reading /proc or process environments is not allowed.')
   }
   if (touches(cmd, GIT_HOOKS_PATH)) return deny('touching .git/hooks is not allowed.')
@@ -164,7 +166,7 @@ function builderShell(cmd: string, ctx: GateCtx): GateResult {
     if (prog === 'git') {
       const why = builderGit(words)
       if (why) return deny(why)
-    } else if (prog === 'ps' && words.slice(1).some((w) => !w.startsWith('-') && /e/.test(w))) {
+    } else if (prog === 'ps' && psShowsEnv(words.slice(1))) {
       return deny('ps with BSD `e` (process environments) is not allowed.')
     } else if (FORGE_CLIS.has(prog)) {
       return deny(`${prog} is not available to the builder; the factory talks to the forge.`)
@@ -173,6 +175,26 @@ function builderShell(cmd: string, ctx: GateCtx): GateResult {
     }
   }
   return ALLOW
+}
+
+/** ps options whose next word is a value (`-o pid,user`), never a BSD flag group. */
+const PS_VALUE_OPTS = new Set(['-o', '-O', '-p', '-q', '-u', '-U', '-g', '-G', '-t', '-C', '-s', '-k', '--format', '--sort', '--pid', '--ppid', '--user', '--group', '--tty', '--cols', '--columns', '--rows', '--lines', '--width'])
+/** BSD flag letters taking a value in the next word when they end a group (`ps axo user`). */
+const PS_BSD_VALUE = /[oOpqtUk]$/
+
+/** True for a BSD-style `e` flag (`ps e`, `ps axe`, `ps aux e`): process environments. */
+function psShowsEnv(args: string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i]
+    if (w.startsWith('-')) {
+      if (PS_VALUE_OPTS.has(w)) i++
+      continue
+    }
+    if (!/^[A-Za-z]+$/.test(w)) continue
+    if (w.includes('e')) return true
+    if (PS_BSD_VALUE.test(w)) i++
+  }
+  return false
 }
 
 /**
@@ -298,12 +320,14 @@ function mentionsForge(words: string[], ctx: GateCtx): boolean {
 /** R23: Read/Grep/Glob/LS paths resolve inside the worktree (relative paths against it). */
 function outsideWorktree(call: GateCall, ctx: GateCtx): string | undefined {
   if (!ctx.worktree || !ctx.worktree.startsWith('/')) return 'no job worktree is known; reads are not allowed.'
-  const wt = normalise(ctx.worktree).toLowerCase()
+  // Containment is case-sensitive (Linux); only the /proc check folds case.
+  const wt = normalise(ctx.worktree)
   const raws = pathsOf(call.input)
   for (const raw of raws) {
     if (raw.startsWith('~')) return `${raw} is outside the job worktree.`
-    const abs = normalise(raw.startsWith('/') ? raw : `${ctx.worktree}/${raw}`).toLowerCase()
-    if (abs === '/proc' || abs.startsWith('/proc/')) return 'reading /proc is not allowed.'
+    const abs = normalise(raw.startsWith('/') ? raw : `${ctx.worktree}/${raw}`)
+    const labs = abs.toLowerCase()
+    if (labs === '/proc' || labs.startsWith('/proc/')) return 'reading /proc is not allowed.'
     if (abs !== wt && !abs.startsWith(wt === '/' ? '/' : `${wt}/`)) return `${raw} is outside the job worktree ${ctx.worktree}; read only files inside it.`
   }
   // A glob pattern that climbs out (`../**`, `/etc/*`) is outside too.

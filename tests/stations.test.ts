@@ -36,6 +36,7 @@ function setup(station: string, comments: Comment[] = [], opts: {
   openMR?: string
   commentFailures?: number
   trackedFactory?: string
+  mkdirFail?: boolean
 } = {}) {
   const state: Job & { head: string } = {
     head: opts.head ?? 'aaaaaaa',
@@ -95,8 +96,11 @@ function setup(station: string, comments: Comment[] = [], opts: {
     return { exitCode: 0 }
   }
   const runs: string[][] = []
-  const run: RunFn = async (argv) => {
+  const runOpts: { cwd?: string; timeoutMs?: number }[] = []
+  const run: RunFn = async (argv, o) => {
     runs.push(argv)
+    runOpts.push(o)
+    if (argv[0] === 'mkdir' && argv.includes('700') && opts.mkdirFail) return { exitCode: 1, stdout: '', stderr: 'mkdir: File exists' }
     // the agent dir was just removed, so ensureCheckout always clones afresh
     if (argv[0] === 'test' && argv[1] === '-d') return { exitCode: 1, stdout: '', stderr: '' }
     if (argv.includes('commit-tree')) { state.head = 'ccccccc'; return { exitCode: 0, stdout: 'ccccccc\n', stderr: '' } }
@@ -116,7 +120,7 @@ function setup(station: string, comments: Comment[] = [], opts: {
     loadConfig: async () => opts.config ?? { ok: true, config: cfg },
     writeFile: async (path, text) => { files[path] = text },
   }
-  return { state, log, mrs, prompts, cwds, runs, files, deps, counts }
+  return { state, log, mrs, prompts, cwds, runs, runOpts, files, deps, counts }
 }
 
 const SPEC = '<!-- factory:spec -->\n## Goal\nRound VAT.'
@@ -619,7 +623,7 @@ test('R21: push and commit-tree run in a fresh bare repo, never the agent dir or
   expect(dirOf(ct)).toBe(dirOf(push))
   const bare = dirOf(push)!
   const init = s.runs.findIndex((a) => a.includes('init') && a.includes(bare))
-  expect(s.runs[init]).toEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', 'init', '--bare', '--quiet', bare])
+  expect(s.runs[init]).toEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/', 'init', '--bare', '--quiet', bare])
   expect(s.runs).toContainEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', bare, 'fetch', '--no-tags', WT, '+HEAD:refs/factory/build'])
   const removed = s.runs.findIndex((a) => a[0] === 'rm' && a.at(-1) === bare)
   expect(removed).toBeGreaterThan(s.runs.indexOf(push))
@@ -704,4 +708,42 @@ test('R22: a branch that tracks .factory/ is blocked without retry, naming it', 
   const lsTree = gitRuns(s.runs).find((a) => a.includes('ls-tree'))!
   expect(dirOf(lsTree)).toMatch(BARE)
   expect(lsTree.slice(-6)).toEqual(['ls-tree', '-r', '--name-only', 'refs/factory/build', '--', '.factory'])
+})
+
+// ---- Task 10 fix round 4 ----
+test('fix4: the bare repo is created exclusively (mkdir -m 700 before git init --bare)', async () => {
+  const s = setup('build', dossier(), { agents: { builder: 'ok\nBUILD-DONE' } })
+  await advance(ref, s.deps)
+  const mk = s.runs.findIndex((a) => a[0] === 'mkdir' && a[1] === '-m' && a[2] === '700' && BARE.test(a[3]))
+  expect(mk).toBeGreaterThan(-1)
+  expect(s.runs[mk].length).toBe(4)
+  const bare = s.runs[mk][3]
+  const init = s.runs.findIndex((a) => a.includes('init') && a.includes(bare))
+  expect(init).toBeGreaterThan(mk)
+})
+
+test('fix4: a failed bare-repo mkdir aborts before init, fetch and push', async () => {
+  const s = setup('build', dossier(), { agents: { builder: 'ok\nBUILD-DONE' }, mkdirFail: true })
+  expect((await advance(ref, s.deps)).to).not.toBe('verify')
+  const mk = s.runs.findIndex((a) => a[0] === 'mkdir' && a[2] === '700')
+  expect(mk).toBeGreaterThan(-1)
+  // (the station may retry once; every attempt stops at its mkdir)
+  expect(s.runs.some((a) => a.includes('init'))).toBe(false)
+  expect(gitRuns(s.runs).some((a) => a.includes('fetch') && BARE.test(dirOf(a) ?? ''))).toBe(false)
+  expect(s.runs.some((a) => a.includes('push'))).toBe(false)
+  // the existing directory is not ours: it is not removed either
+  expect(s.runs.some((a) => a[0] === 'rm' && BARE.test(a.at(-1)!))).toBe(false)
+})
+
+test('fix4: token-bearing ls-remote, clone and init run with -C / (no repo discovery from the mod cwd)', async () => {
+  const s = setup('build', dossier(), { agents: { builder: 'ok\nBUILD-DONE' } })
+  await advance(ref, s.deps)
+  // ls-remote runs when verify checks a cached report against the branch head
+  const v = setup('verify', [...dossier(), c('t', '<!-- factory:test-report passed=false sha=0000000 -->', 5)])
+  await advance(ref, v.deps)
+  const tokenless = gitRuns([...s.runs, ...v.runs]).filter((a) => a.includes('ls-remote') || a.includes('clone') || a.includes('init'))
+  expect(tokenless.some((a) => a.includes('ls-remote'))).toBe(true)
+  expect(tokenless.some((a) => a.includes('clone'))).toBe(true)
+  expect(tokenless.some((a) => a.includes('init'))).toBe(true)
+  for (const a of tokenless) expect(a.slice(a.indexOf('git'), a.indexOf('git') + 7)).toEqual(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/'])
 })

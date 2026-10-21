@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { branchName, workDir, ensureCheckout, gitArgv } from '../src/worktree'
+import { branchName, workDir, ensureCheckout, gitArgv, gitNoDir } from '../src/worktree'
 import type { RunFn } from '../src/worktree'
 
 const ref = { forge: 'github' as const, project: 'acme/shop', issue: 42 }
@@ -76,4 +76,16 @@ test('gitArgv hardens against planted hooks and fsmonitor; every git call is har
   const f = fake(false, false)
   await ensureCheckout(f.run, o)
   for (const c of f.calls.filter((x) => x.includes('git'))) expect(c.slice(0, 8)).toEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'])
+})
+
+test('fix4: gitNoDir runs git from / so clone, ls-remote and init never discover a repo from the mod cwd', () => {
+  expect(gitNoDir('ls-remote', 'u')).toEqual(['env', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/', 'ls-remote', 'u'])
+})
+test('fix4: ensureCheckout clones with -C /', async () => {
+  const f = fake(false, false)
+  await ensureCheckout(f.run, o)
+  const clone = f.calls.find((c) => c.includes('clone'))!
+  expect(clone[clone.indexOf('clone') - 2]).toBe('-C')
+  expect(clone[clone.indexOf('clone') - 1]).toBe('/')
+  expect(clone.slice(-2)).toEqual([o.cloneUrl, '/d'])
 })

@@ -18,9 +18,13 @@ export function gitArgv(dir: string, ...args: string[]): string[] {
   return [...GIT_ENV, 'git', ...GIT_SAFE, '-C', dir, ...args]
 }
 
-/** Hardened git argv for a command with no working directory (clone, ls-remote, init). */
+/**
+ * Hardened git argv for a command with no working directory (clone, ls-remote, init).
+ * `-C /` keeps git from discovering a repository (and its config) from the mod's cwd;
+ * callers pass absolute paths.
+ */
 export function gitNoDir(...args: string[]): string[] {
-  return [...GIT_ENV, 'git', ...GIT_SAFE, ...args]
+  return [...GIT_ENV, 'git', ...GIT_SAFE, '-C', '/', ...args]
 }
 
 export function branchName(ref: JobRef, title: string, prefix: string): string {
