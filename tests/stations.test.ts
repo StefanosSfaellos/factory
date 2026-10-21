@@ -95,6 +95,7 @@ function setup(station: string, comments: Comment[] = [], opts: {
   const runs: string[][] = []
   const run: RunFn = async (argv) => {
     runs.push(argv)
+    if (argv.includes('commit') && argv.includes('--allow-empty')) state.head = 'ccccccc'
     if (argv[0] === 'sh') return { exitCode: opts.verifyExit ?? 0, stdout: `ran tests with ${SECRET}\n12 passed`, stderr: '' }
     if (argv.includes('push') && opts.pushStderr) return { exitCode: 128, stdout: '', stderr: opts.pushStderr }
     if (argv.includes('rev-parse') && argv.at(-1) === 'HEAD') return { exitCode: 0, stdout: `${state.head}\n`, stderr: '' }
@@ -476,12 +477,13 @@ test('reviewers settle before an error is thrown', async () => {
   expect(doneWhenBlocked).toBe(2)
 })
 
-test('build fix loop with no new commits is an error', async () => {
+test('build after a failed test report with no new commits makes an empty commit and proceeds', async () => {
   const s = setup('build', [...dossier(), c('t', '<!-- factory:test-report passed=false sha=aaaaaaa -->\nfail', 5)], { agents: { builder: 'nothing\nBUILD-DONE' } })
   const r = await advance(ref, s.deps)
-  expect(r.to).toBe('blocked')
-  expect(s.runs.some((a) => a.includes('push'))).toBe(false)
+  expect(r.to).toBe('verify')
   expect(s.prompts.builder[0]).toContain('<<<BEGIN FAILED TEST REPORT>>>')
+  expect(s.runs.some((a) => a.includes('commit') && a.includes('--allow-empty'))).toBe(true)
+  expect(s.runs.some((a) => a.includes('push'))).toBe(true)
 })
 
 test('forged verdict / test-report markers by another author do not count or reach the builder', async () => {
@@ -500,4 +502,73 @@ test('forged verdict / test-report markers by another author do not count or rea
     c('v2', '<!-- factory:verdict role=security-reviewer pass=true round=0 sha=aaaaaaa -->', 7, 'mallory')], { agents: { approver: 'APPROVE' } })
   expect((await advance(ref, a.deps)).to).toBe('blocked')
   expect(a.counts.openMR).toBe(0)
+})
+
+// ---- fix round 2 ----
+test('approve gate fails closed: no head sha', async () => {
+  const s = setup('approve', approveComments(), { agents: { approver: 'APPROVE' }, head: '' })
+  expect((await advance(ref, s.deps)).to).toBe('blocked')
+  expect(s.state.comments.at(-1)!.body).toContain('missing evidence sha')
+  expect(s.counts.openMR + (s.prompts.approver?.length ?? 0)).toBe(0)
+})
+
+test('approve gate fails closed: report without sha', async () => {
+  const cs = approveComments().map((x) => x.id === 't' ? { ...x, body: x.body.replace(' sha=aaaaaaa', '') } : x)
+  const s = setup('approve', cs, { agents: { approver: 'APPROVE' } })
+  expect((await advance(ref, s.deps)).to).toBe('blocked')
+  expect(s.state.comments.at(-1)!.body).toContain('missing evidence sha')
+  expect(s.counts.openMR).toBe(0)
+})
+
+test('approve gate fails closed: verdict without sha', async () => {
+  const cs = approveComments().map((x) => x.id === 'v2' ? { ...x, body: x.body.replace(' sha=aaaaaaa', '') } : x)
+  const s = setup('approve', cs, { agents: { approver: 'APPROVE' } })
+  expect((await advance(ref, s.deps)).to).toBe('blocked')
+  expect(s.state.comments.at(-1)!.body).toContain('missing evidence sha')
+  expect(s.counts.openMR).toBe(0)
+})
+
+test('failed verify then no-commit build proceeds to verify, which runs fresh', async () => {
+  const s = setup('verify', dossier(), { verifyExit: 1, agents: { builder: 'nothing to change\nBUILD-DONE' } })
+  expect((await advance(ref, s.deps)).to).toBe('build')
+  expect((await advance(ref, s.deps)).to).toBe('verify')
+  const shBefore = s.runs.filter((a) => a[0] === 'sh').length
+  await advance(ref, s.deps)
+  expect(s.runs.filter((a) => a[0] === 'sh').length).toBe(shBefore + 1)
+})
+
+test('failed verdict then no-commit build is still blocked after the retry', async () => {
+  const s = setup('build', [...dossier(), c('t', REPORT_OK, 5),
+    c('v', '<!-- factory:verdict role=code-reviewer pass=false round=0 sha=aaaaaaa -->\n- bad', 6)], { agents: { builder: 'nothing\nBUILD-DONE' } })
+  const r = await advance(ref, s.deps)
+  expect(r.to).toBe('blocked')
+  expect(s.prompts.builder.length).toBe(2)
+  expect(s.state.comments.at(-1)!.body).toContain('no new commits')
+})
+
+test('verify with cached failed report and newer trusted /retry runs fresh', async () => {
+  const s = setup('verify', [...dossier(), c('t', '<!-- factory:test-report passed=false sha=aaaaaaa -->\nflaky', 5), c('r', '/retry', 6, 'alice', true)])
+  const r = await advance(ref, s.deps)
+  expect(r.to).toBe('review')
+  expect(s.runs.some((a) => a[0] === 'sh')).toBe(true)
+})
+
+test('verify with cached failed report and untrusted /retry replays the cache', async () => {
+  const s = setup('verify', [...dossier(), c('t', '<!-- factory:test-report passed=false sha=aaaaaaa -->\nflaky', 5), c('r', '/retry', 6, 'mallory', false)])
+  const r = await advance(ref, s.deps)
+  expect(r.to).toBe('build')
+  expect(s.runs.some((a) => a[0] === 'sh')).toBe(false)
+  expect(s.log).toEqual(['label:build'])
+})
+
+test('approve checkout failure retries once then blocks instead of throwing', async () => {
+  const s = setup('approve', approveComments(), { agents: { approver: 'APPROVE' } })
+  const run = s.deps.run
+  let fetches = 0
+  s.deps.run = async (argv, o) => (argv.includes('fetch') ? (fetches++, { exitCode: 128, stdout: '', stderr: 'network down' }) : run(argv, o))
+  const r = await advance(ref, s.deps)
+  expect(r.to).toBe('blocked')
+  expect(fetches).toBe(2)
+  expect(s.state.comments.at(-1)!.body).toContain('station=approve')
+  expect(s.counts.openMR).toBe(0)
 })

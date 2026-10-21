@@ -117,12 +117,16 @@ function approveGate(job: Job, roles: Role[], round: number, head: string | unde
   if (!report || report.attrs.passed !== 'true') return { ok: false, why: 'the latest test report is missing or failing' }
   const lastFail = newest(markersOf(job, 'verdict').filter((x) => x.attrs.pass === 'false'))
   if (lastFail && at(lastFail.c) >= at(report.c)) return { ok: false, why: 'a failing verdict is newer than the latest passing test report' }
-  if (head && report.attrs.sha && report.attrs.sha !== head) return { ok: false, why: `the branch head ${head} is not the verified commit ${report.attrs.sha}` }
+  if (!head) return { ok: false, why: 'missing evidence sha: could not read the branch head' }
+  if (!report.attrs.sha) return { ok: false, why: 'missing evidence sha: the latest test report has no sha' }
+  if (report.attrs.sha !== head) return { ok: false, why: `the branch head ${head} is not the verified commit ${report.attrs.sha}` }
   const inRound = markersOf(job, 'verdict').filter((x) => x.attrs.round === String(round) && at(x.c) > at(report.c))
   if (inRound.some((x) => x.attrs.pass !== 'true')) return { ok: false, why: `a verdict in round ${round} failed` }
   const verdicts: Verdict[] = []
   for (const role of roles) {
-    const mine = inRound.filter((x) => x.attrs.role === role && (!head || !x.attrs.sha || x.attrs.sha === head))
+    const all = inRound.filter((x) => x.attrs.role === role)
+    if (all.some((x) => !x.attrs.sha)) return { ok: false, why: `missing evidence sha: a ${role} verdict in round ${round} has no sha` }
+    const mine = all.filter((x) => x.attrs.sha === head)
     if (mine.length === 0) return { ok: false, why: `no passing ${role} verdict in round ${round} for the verified commit` }
     verdicts.push(toVerdict(newest(mine)!))
   }
@@ -232,10 +236,19 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
         const out = await agent('builder', a)
         const lines = out.split('\n').map((l) => l.trim()).filter((l) => l !== '')
         if (lines[lines.length - 1] !== 'BUILD-DONE') throw new Error(`builder did not finish (no BUILD-DONE): ${lines.slice(-5).join(' / ')}`)
-        // A fix loop must move the branch, or verify/review re-entry could not tell it from a retry.
+        // After failed review findings the branch must move; after a failed test report an
+        // unchanged branch is fine (verify runs fresh; each failed report counts as a fix loop).
         const lastFail = newest([...markersOf(job, 'test-report').filter((x) => x.attrs.passed === 'false'), ...markersOf(job, 'verdict').filter((x) => x.attrs.pass === 'false')])
-        const sha = await headSha()
-        if (ctx.fixLoops > 0 && lastFail?.attrs.sha && lastFail.attrs.sha === sha) throw new Error(`builder made no new commits since the failed round (head ${sha})`)
+        if (ctx.fixLoops > 0 && lastFail?.attrs.sha) {
+          const sha = await headSha()
+          if (lastFail.attrs.sha === sha) {
+            if (parseMarker(lastFail.c.body)?.kind === 'verdict') throw new Error(`builder made no new commits since the failed review (head ${sha})`)
+            // Unchanged code after a failed test run (e.g. a flaky test): an empty commit gives the
+            // branch a new head so verify runs fresh instead of replaying the cached report.
+            await runOk(['git', '-C', dir, '-c', 'user.name=software-factory', '-c', 'user.email=software-factory@users.noreply',
+              'commit', '--allow-empty', '-m', 'chore: re-verify after failed test run'], 'git commit --allow-empty')
+          }
+        }
         await runOk(['git', '-C', dir, 'push', cloneUrl, `HEAD:refs/heads/${branch}`], 'git push')
         return { posts: [], event: { kind: 'build-done' } }
       }
@@ -289,7 +302,11 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
   }
   const report = newest(markersOf(job, 'test-report'))
   const settle = (o: Outcome) => finish({ ...o, posts: [] }, true)
-  if (from === 'verify' && report?.attrs.sha) {
+  // A trusted `/retry` newer than the cached markers forces a fresh run instead of a replay.
+  const retryAt = Math.max(-Infinity, ...job.comments
+    .filter((c) => c.trusted !== false && c.body.trim().split(/\s+/, 1)[0] === '/retry').map(at))
+  const replayable = (...cs: Comment[]) => cs.every((c) => at(c) > retryAt)
+  if (from === 'verify' && report?.attrs.sha && replayable(report.c)) {
     const sha = await remoteSha()
     const lastFail = newest(markersOf(job, 'verdict').filter((x) => x.attrs.pass === 'false'))
     if (sha === report.attrs.sha && (!lastFail || at(report.c) > at(lastFail.c))) {
@@ -300,7 +317,7 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
   }
   if (from === 'review' && report) {
     const { byRole, round } = verdictsAfter(job, report, ctx.requiredReviewers)
-    if (round !== undefined && ctx.requiredReviewers.every((r) => byRole.get(r)?.attrs.round === round)) {
+    if (round !== undefined && ctx.requiredReviewers.every((r) => byRole.get(r)?.attrs.round === round) && replayable(...[...byRole.values()].map((x) => x.c))) {
       const verdicts = [...byRole.values()].map(toVerdict)
       return settle({ posts: [], event: { kind: 'verdicts', verdicts }, failed: verdicts.filter((v) => !v.pass), round: Number(round) })
     }
@@ -309,12 +326,13 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
   let gateSha: string | undefined
   if (from === 'approve') {
     const rej = report && verdictsAfter(job, report, ['approver']).byRole.get('approver')
-    if (rej && rej.attrs.pass === 'false') {
+    if (rej && rej.attrs.pass === 'false' && replayable(rej.c)) {
       const v = toVerdict(rej)
       return settle({ posts: [], event: { kind: 'verdicts', verdicts: [v] }, failed: [v], round: Number(rej.attrs.round) })
     }
-    await checkout()
-    gateSha = await headSha()
+    const prep = await attempt(async () => { await checkout(); return headSha() })
+    if (!prep.ok) return prep.blocked
+    gateSha = prep.value
     const gate = approveGate(job, ctx.requiredReviewers, ctx.fixLoops, gateSha)
     if (!gate.ok) return block(from, `Refusing to run the approver: ${gate.why}. Relabel to \`factory::build\` or \`factory::verify\` to produce fresh evidence.`)
     gateVerdicts = gate.verdicts
@@ -323,17 +341,9 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
     if (open) return commit(from, 'mr-open', [`${marker('approval', { mr: open.url })}\nMerge request already open for \`${branch}\`.`])
   }
 
-  let outcome: Outcome
-  try {
-    outcome = await step()
-  } catch (first) {
-    try {
-      outcome = await step()
-    } catch (second) {
-      const to = next(from, { kind: 'error', message: errText(second), retried: true }, ctx).station
-      return commit(from, to, [`${marker('blocked', { station: from })}\nStation \`${from}\` failed twice (retried once).\n\nFirst error: ${errText(first)}\n\nError: ${errText(second)}`])
-    }
-  }
+  const done = await attempt(step)
+  if (!done.ok) return done.blocked
+  const outcome = done.value
 
   if (outcome.approved !== undefined) {
     // Outside the retried step: never open a second MR for the same branch.
@@ -343,6 +353,20 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
     outcome.posts.push(`${marker('approval', { mr: mr.url })}\n${summary}`)
   }
   return finish(outcome, false)
+
+  /** Runs station work, retrying once; a second failure posts `blocked` with the station and error. */
+  async function attempt<T>(fn: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; blocked: AdvanceResult }> {
+    try {
+      return { ok: true, value: await fn() }
+    } catch (first) {
+      try {
+        return { ok: true, value: await fn() }
+      } catch (second) {
+        const to = next(from, { kind: 'error', message: errText(second), retried: true }, ctx).station
+        return { ok: false, blocked: await commit(from, to, [`${marker('blocked', { station: from })}\nStation \`${from}\` failed twice (retried once).\n\nFirst error: ${errText(first)}\n\nError: ${errText(second)}`]) }
+      }
+    }
+  }
 
   async function finish(o: Outcome, reentry: boolean): Promise<AdvanceResult> {
     // The approver's REJECT is a failed review round: reuse the review transition.
