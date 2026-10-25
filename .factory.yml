@@ -1,0 +1,5 @@
+# Smoke-test config for the software factory (safe to delete after the test).
+forge: github
+test: "test -f hello.txt && grep -q hello hello.txt"
+reviewers: [code]
+limits: { fixLoops: 2, parallel: 1 }
