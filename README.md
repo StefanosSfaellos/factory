@@ -55,7 +55,7 @@ One session can work github.com and several GitLab servers at once.
 | `gitlab:<host>/group/*` | that group on `<host>`, with its subgroups |
 | `gitlab:<host>/*` | every project on `<host>` the token can see |
 
-A first path segment that contains a dot is a host; GitLab group names in the first segment must therefore not contain a dot (write the host first if they do: `gitlab:gitlab.com/my.group/app`). A wildcard costs one paged search per station label per tick (11 queries), and the factory only ever touches a project when one of its open issues carries a `factory::` label. A labelled issue in a project without a `.factory.yml` is blocked with a comment saying so. GitLab wildcards (`gitlab:<host>/*`, `gitlab:<host>/group/*`) cover only projects where the token's user is a member with **Developer access or more**, and in those only open issues carrying a `factory::` label: public projects of others on the same instance, and projects where the user is only Guest or Reporter, are ignored. The member list is read once per tick and host; if that read fails, the wildcard yields no jobs that tick and the error shows in `/factory status` and the tick output. GitHub wildcards (`github:*`, `github:owner/*`) use `/issues?filter=all`, which GitHub already limits to repositories the user owns, is a collaborator on, or reaches through an organisation membership.
+A first path segment that contains a dot is a host, and so is one equal to the `GITLAB_URL` host (which may have no dot, e.g. `http://gitlab:8080`: write `gitlab:gitlab/group/name` or `gitlab:gitlab:8080/group/name`). A GitLab group in the first segment that contains a dot, or is named like that host, needs the host written first: `gitlab:gitlab.com/my.group/app`. Host and project paths are matched without regard to case (`github:acme/app` and `github:Acme/*` find one job). A wildcard costs one paged search per station label per tick (11 queries), and the factory only ever touches a project when one of its open issues carries a `factory::` label. A labelled issue in a project without a `.factory.yml` is blocked with a comment saying so. GitLab wildcards (`gitlab:<host>/*`, `gitlab:<host>/group/*`) cover only projects where the token's user is a member with **Developer access or more**, and in those only open issues carrying a `factory::` label: public projects of others on the same instance, and projects where the user is only Guest or Reporter, are ignored. The member list is read once per tick and host; if that read fails, the wildcard yields no jobs that tick and the error shows in `/factory status` and the tick output. GitHub wildcards (`github:*`, `github:owner/*`) use `/issues?filter=all`, which GitHub already limits to repositories the user owns, is a collaborator on, or reaches through an organisation membership. On gitlab.com prefer group wildcards (`gitlab:group/*`) to `gitlab:*`: the whole-instance search returns every public issue carrying a `factory::` label before the membership filter drops them, which is slow and wasteful there.
 
 **Tokens**, one per host:
 
@@ -63,7 +63,7 @@ A first path segment that contains a dot is a host; GitLab group names in the fi
 |---|---|
 | `GITHUB_TOKEN` | `github.com` |
 | `GITLAB_TOKEN` | the host of `GITLAB_URL` (default `https://gitlab.com`) |
-| `FACTORY_TOKENS` | `host=token,host=token`: host names without `https://` (compared lower-case); an entry here overrides the two above for its host. `github.com=<token>` is GitHub; any other host is a GitLab server, reached at `https://<host>` |
+| `FACTORY_TOKENS` | `host=token,host=token`: host names without `https://` (compared lower-case); an entry here overrides the two above for its host. `github.com=<token>` is GitHub; any other host is a GitLab server, always reached over `https://<host>`. A FACTORY_TOKENS host must contain a dot and have no port; a GitLab on a dotless host, a port or plain http goes in `GITLAB_URL` + `GITLAB_TOKEN` |
 
 Every token needs to read the repositories and write issues, branches and merge/pull requests (GitLab scope `api`). Wildcards need a **personal or group access token**: a project access token sees only its own project. A repo whose host has no token is reported in `/factory status` and in each tick (`no token for lab.example.gr: add "lab.example.gr=<token>" to FACTORY_TOKENS`); the other repos still run.
 
@@ -88,7 +88,7 @@ Full `~/.claude/settings.json` example:
 }
 ```
 
-**Issue references.** A job is shown as `github:owner/name#42`, as `gitlab:group/name#42` when it is on the `GITLAB_URL` host, and as `gitlab:<host>/group/name#42` on any other GitLab host. Every form shown can be typed back into `/factory run|status|approve|revise`. `#42` alone works only when exactly one repo is configured and it is not a wildcard.
+**Issue references.** A job is shown as `github:owner/name#42`, as `gitlab:group/name#42` when it is on the `GITLAB_URL` host, and as `gitlab:<host>/group/name#42` on any other GitLab host. A GitLab project whose first segment has a dot (or is named like the `GITLAB_URL` host) is always shown with its host. Every form shown can be typed back into `/factory run|status|approve|revise`. A full reference works on any project the host's token can reach, whether or not `repos` lists it: `/factory run gitlab:lab.example.gr/other/app#3` labels and runs that issue. `#42` alone works only when exactly one repo is configured and it is not a wildcard.
 
 ## How a job moves
 
@@ -128,7 +128,7 @@ Only trusted commenters count. On GitHub: `OWNER`, `MEMBER` or `COLLABORATOR`. O
 | `/factory help` | Lists the commands |
 | `/factory tick` | One pass over the configured repos |
 | `/factory new <title> [-- body]` | Creates an issue labelled `factory::ready` |
-| `/factory run <issue>` | Puts an issue on the line and ticks it now |
+| `/factory run <issue>` | Puts an issue on the line and ticks it now (a full reference works on any project the token can reach, not only those in `repos`) |
 | `/factory approve <issue>` | Approves the spec |
 | `/factory revise <issue> <notes>` | Sends the spec back with notes |
 | `/factory status [issue]` | Text summary of the jobs |

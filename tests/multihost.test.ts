@@ -3,7 +3,8 @@ import { handle, parseRepos, resolveIssue, type Env } from '../src/commands'
 import { gitlabForge } from '../src/forge/gitlab'
 import { githubForge } from '../src/forge/github'
 import type { Forge, HttpFn } from '../src/forge/types'
-import { entryLabel, forgeHostsOf, jobKey, refLabel, resolveTokens, sameRef } from '../src/hosts'
+import { entryLabel, forgeHostsOf, fullRef, jobKey, refLabel, resolveTokens, sameRef } from '../src/hosts'
+import { uiId } from '../src/ui/render'
 import { childArgv, childSettings } from '../src/agents'
 import { NO_TOKENS, workDir } from '../src/worktree'
 import { tick } from '../src/tick'
@@ -217,7 +218,7 @@ test('GitLab listJobsIn group: include_subgroups; project path falls back to the
   ])
   expect(reqs.some((q) => /\/projects\/\d+$/.test(q.url))).toBe(false)
   expect(reqs.filter((q) => q.url.includes(MEMBERS)).map((q) => q.url.slice(-6))).toEqual(['page=1', 'page=2', 'page=3'])
-  expect(reqs.every((q) => q.headers['PRIVATE-TOKEN'] === 't')).toBe(true)
+  expect(reqs.every((q) => q.headers.Authorization === 'Bearer t')).toBe(true)
 })
 
 // Fix 1: GitLab wildcards cover only projects where the token's user has Developer (30) access or more.
@@ -429,11 +430,11 @@ const notFound = { value: { status: 404, ok: false, headers: {}, text: '' } }
 /** Three forges in memory: each answers one awaiting-spec issue #4 in its project. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function threeForges(on: any) {
-  const seen: { host: string; auth: string; url: string }[] = []
+  const seen: { host: string; auth: string; url: string; headers: Record<string, string> }[] = []
   on('http.fetch', (_: unknown, e: { url: string; init?: { headers?: Record<string, string> } }) => {
     const u = new URL(e.url)
     const h = e.init?.headers ?? {}
-    seen.push({ host: u.host, auth: h['PRIVATE-TOKEN'] ?? h.Authorization ?? '', url: e.url })
+    seen.push({ host: u.host, auth: h.Authorization ?? '', url: e.url, headers: h })
     const p = e.url.replace(/^https:\/\/[^/]+/, '')
     if (u.host === 'api.github.com') {
       if (p === '/user') return json({ login: 'bot' })
@@ -461,7 +462,7 @@ test('one session ticks two GitLab hosts and GitHub, each job on its own forge i
   expect(r.text).toContain('gitlab:g/p#4: skipped (awaiting spec decision)')
   expect(r.text).toContain('gitlab:lab.b.gr/g/p#4: skipped (awaiting spec decision)')
   expect(r.text).toContain('github:o/r#4: skipped (awaiting spec decision)')
-  const want: Record<string, string> = { 'lab.a.gr': 'tok-a', 'lab.b.gr': 'tok-b', 'api.github.com': 'Bearer tok-gh' }
+  const want: Record<string, string> = { 'lab.a.gr': 'Bearer tok-a', 'lab.b.gr': 'Bearer tok-b', 'api.github.com': 'Bearer tok-gh' }
   for (const q of seen) expect(q.auth).toBe(want[q.host])
   for (const host of Object.keys(want)) expect(seen.some((q) => q.host === host && /issues\/4$/.test(q.url))).toBe(true)
   // status names each host's job once
@@ -477,13 +478,24 @@ test('a host with no token is a status and tick error line, not a crash', { opti
   mock.env(on, { GITLAB_TOKEN: 'glpat-real-token-123', HOME: '/home/u' })
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('http.fetch', (_, e) => (e.url.endsWith('/user') ? json({ username: 'bot' }) : json([])))
+  const reqs: { url: string; headers: Record<string, string> }[] = []
+  on('http.fetch', (_, e) => {
+    reqs.push({ url: e.url, headers: (e.init?.headers ?? {}) as Record<string, string> })
+    return e.url.endsWith('/user') ? json({ username: 'bot' }) : json([])
+  })
   await $.session.start({ cwd: '/', surface: null, isInteractive: false })
   const s = await $.command.run({ command: 'factory', args: 'status' })
   expect(s.text).toContain('gitlab:g/p: 0 jobs')
   expect(s.text).toContain('gitlab:lab.c.gr/x/y: no token for lab.c.gr: add "lab.c.gr=<token>" to FACTORY_TOKENS')
   const t = await $.command.run({ command: 'factory', args: 'tick' })
   expect(t.text).toContain('gitlab:lab.c.gr/x/y: skipped (no token for lab.c.gr: add "lab.c.gr=<token>" to FACTORY_TOKENS)')
+  // Nothing went to the token-less host, and every request carries its own host's token.
+  expect(reqs.length).toBeGreaterThan(0)
+  expect(reqs.some((q) => q.url.includes('lab.c.gr'))).toBe(false)
+  for (const q of reqs) {
+    expect(q.url.startsWith('https://gitlab.com/')).toBe(true)
+    expect(q.headers.Authorization).toBe('Bearer glpat-real-token-123')
+  }
 })
 
 test('FACTORY_TOKENS values are redacted from what the commands answer', { options: { repos: 'gitlab:lab.b.gr/x/y' } }, async ($, on) => {
@@ -511,4 +523,96 @@ test('bad FACTORY_TOKENS pairs show in status', { options: { repos: 'gitlab:g/p'
   const s = await $.command.run({ command: 'factory', args: 'status' })
   expect(s.text).toContain('FACTORY_TOKENS')
   expect(s.text).not.toContain('oops123')
+})
+
+// ---------------------------------------------------------------------------
+// Fix 2
+
+test('GitLab sends its token only in Authorization (dropped on cross-origin redirects), never PRIVATE-TOKEN', async () => {
+  const TOKEN = 'glpat-SECRET-0123456789'
+  const { http, reqs } = fakeHttp((url) => {
+    if (url.endsWith('/user')) return { username: 'bot' }
+    if (url.includes('/issues?')) return url.endsWith('page=1') ? [{ iid: 1, labels: ['factory::ready'] }] : []
+    if (url.endsWith('/issues/1')) return { iid: 1, title: 'T', labels: [] }
+    if (url.includes('/notes')) return url.includes('page=1') || !url.includes('page=') ? (url.includes('?') ? [] : { id: 1, body: 'x', created_at: 'now', author: { username: 'bot' } }) : []
+    if (url.includes('/repository/files/')) return 'forge: gitlab'
+    if (url.includes('/projects?membership=')) return url.endsWith('page=1') ? [{ id: 1, path_with_namespace: 'g/p' }] : []
+    return undefined
+  })
+  const f = gitlabForge(http, { baseUrl: 'https://lab.a.gr', token: TOKEN })
+  const ref: JobRef = { forge: 'gitlab', host: 'lab.a.gr', project: 'g/p', issue: 1 }
+  await f.whoami()
+  await f.listJobs('g/p')
+  await f.listJobsIn({ kind: 'all' })
+  await f.getJob(ref)
+  await f.comment(ref, 'hi')
+  await f.readFile('g/p', '.factory.yml', 'main')
+  expect(reqs.length).toBeGreaterThan(5)
+  for (const q of reqs) {
+    expect(q.headers.Authorization).toBe(`Bearer ${TOKEN}`)
+    const carrying = Object.entries(q.headers).filter(([, v]) => v.includes(TOKEN)).map(([k]) => k)
+    expect(carrying).toEqual(['Authorization'])
+  }
+})
+
+test('jobKey, sameRef and workDir ignore case in host and project; display keeps it', () => {
+  const a: JobRef = { forge: 'github', host: 'github.com', project: 'Acme/App', issue: 7 }
+  const b: JobRef = { forge: 'github', host: 'github.com', project: 'acme/app', issue: 7 }
+  expect(jobKey(a)).toBe(jobKey(b))
+  expect(sameRef(a, b)).toBe(true)
+  expect(workDir('/w', a)).toBe(workDir('/w', b))
+  expect(refLabel(a, 'gitlab.com')).toBe('github:Acme/App#7')
+  expect(fullRef(a)).toBe('github:Acme/App#7')
+  const g: JobRef = { forge: 'gitlab', host: 'lab.a.gr', project: 'Team/App', issue: 2 }
+  expect(jobKey(g)).toBe('gitlab:lab.a.gr/team/app#2')
+  expect(fullRef(g)).toBe('gitlab:lab.a.gr/Team/App#2')
+  expect(resolveIssue(fullRef(g), [], 'gitlab.com')).toEqual({ ref: g })
+})
+
+test('a dotless GITLAB_URL host (with a port) round-trips through keys, labels and refs', () => {
+  const t = resolveTokens({ gitlab: 'x', gitlabUrl: 'http://gitlab:8080' })
+  expect(t.gitlabHost).toBe('gitlab')
+  expect(t.hosts.gitlab.baseUrl).toBe('http://gitlab:8080')
+  const ref: JobRef = { forge: 'gitlab', host: 'gitlab', project: 'g/p', issue: 1 }
+  for (const s of [jobKey(ref), fullRef(ref), refLabel(ref, t.gitlabHost), 'gitlab:gitlab:8080/g/p#1', 'gitlab:GITLAB/g/p#1']) {
+    expect(resolveIssue(s, [], t.gitlabHost, t.knownHosts)).toEqual({ ref })
+  }
+  expect(parseRepos('gitlab:gitlab/g/p,gitlab:gitlab:8080/team/*', { gitlabHost: t.gitlabHost, knownHosts: t.knownHosts }).projects).toEqual([
+    { forge: 'gitlab', host: 'gitlab', project: 'g/p' },
+    { forge: 'gitlab', host: 'gitlab', project: 'team/*', scope: { kind: 'group', path: 'team' } },
+  ])
+  // localhost too
+  const l = resolveTokens({ gitlab: 'x', gitlabUrl: 'http://localhost' })
+  const lr: JobRef = { forge: 'gitlab', host: 'localhost', project: 'g/p', issue: 3 }
+  expect(resolveIssue(jobKey(lr), [], l.gitlabHost, l.knownHosts)).toEqual({ ref: lr })
+})
+
+test('a dotted GITLAB_URL host with a port round-trips', () => {
+  const t = resolveTokens({ gitlab: 'x', gitlabUrl: 'https://lab.x.gr:8443/' })
+  expect(t.gitlabHost).toBe('lab.x.gr')
+  const ref: JobRef = { forge: 'gitlab', host: 'lab.x.gr', project: 'g/p', issue: 1 }
+  for (const s of [jobKey(ref), refLabel(ref, t.gitlabHost), 'gitlab:lab.x.gr:8443/g/p#1']) {
+    expect(resolveIssue(s, [], t.gitlabHost, t.knownHosts)).toEqual({ ref })
+  }
+})
+
+test('labels keep the host when the first project segment has a dot or is a known host', () => {
+  const r: JobRef = { forge: 'gitlab', host: 'gitlab.com', project: 'my.group/app', issue: 5 }
+  expect(refLabel(r, 'gitlab.com')).toBe('gitlab:gitlab.com/my.group/app#5')
+  expect(resolveIssue(refLabel(r, 'gitlab.com'), [], 'gitlab.com')).toEqual({ ref: r })
+  expect(parseRepos('gitlab:gitlab.com/my.group/app').projects).toEqual([{ forge: 'gitlab', host: 'gitlab.com', project: 'my.group/app' }])
+  expect(entryLabel({ forge: 'gitlab', host: 'gitlab.com', project: 'my.group/*' }, 'gitlab.com')).toBe('gitlab:gitlab.com/my.group/*')
+  const k: JobRef = { forge: 'gitlab', host: 'gitlab', project: 'gitlab/app', issue: 1 }
+  expect(refLabel(k, 'gitlab', ['gitlab'])).toBe('gitlab:gitlab/gitlab/app#1')
+  expect(resolveIssue(refLabel(k, 'gitlab', ['gitlab']), [], 'gitlab', ['gitlab'])).toEqual({ ref: k })
+  // ordinary labels stay short
+  expect(refLabel({ ...r, project: 'g/app' }, 'gitlab.com')).toBe('gitlab:g/app#5')
+})
+
+test('UI ids are collision-free', () => {
+  const v = (project: string) => ({ ref: { forge: 'gitlab' as const, host: 'lab.a.gr', project, issue: 1 } }) as never
+  const jobs = [v('a-b/c'), v('a/b-c'), v('a.b/c'), v('a_b/c')]
+  const ids = jobs.map((j: { ref: JobRef }) => uiId(jobs, j.ref))
+  expect(new Set(ids).size).toBe(4)
+  for (const id of ids) expect(id).toMatch(/^[A-Za-z0-9-]+$/)
 })

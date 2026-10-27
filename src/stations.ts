@@ -8,7 +8,7 @@ import type { Comment, Job, JobRef, Station, Verdict } from './types'
 import { verify } from './verify'
 import { runAgent, type SpawnFn } from './agents'
 import { branchName, ensureCheckout, gitArgv, gitNoDir, NET_TIMEOUT_MS, workDir, type RunFn } from './worktree'
-import { jobKey } from './hosts'
+import { fullRef } from './hosts'
 
 // Station runner: `advance` performs one station step for one job.
 // State-write order: every comment is posted first, the label changes last.
@@ -194,7 +194,7 @@ export async function advance(ref: JobRef, deps: Deps): Promise<AdvanceResult> {
   // directory an agent could have written to.
   const dir = workDir(deps.workRoot, ref)
   const branch = branchName(ref, job.title, cfg.branchPrefix)
-  const jobId = jobKey(ref)
+  const jobId = fullRef(ref)
   const art = (kind: string) => textOf(findLatest(job.comments, kind))
 
   /** A fresh agent directory: removed, cloned from the forge, origin reset to the public URL. */

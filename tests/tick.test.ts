@@ -320,3 +320,17 @@ test('a failing re-read after acquiring releases the lease', async () => {
   expect(r.skipped).toEqual([{ ref: w.jobs.get(25)!.ref, reason: 'error: 502' }])
   expect(w.edits).toEqual([{ id: 'c1', body: leaseBody('w1', T0, 0) }])
 })
+
+test('an exact entry and a wildcard with differently-cased paths advance the job once', async () => {
+  const { deps, forge } = world([{ issue: 1, station: 'ready' }])
+  const lower = await forge.listJobs('g/p')
+  forge.listJobs = async () => lower.map((r) => ({ ...r, project: 'g/p' }))
+  forge.listJobsIn = async () => lower.map((r) => ({ ...r, project: 'G/P' }))
+  const r = await tick({
+    ...deps, parallel: 2,
+    projects: [{ forge: 'gitlab', host: 'gitlab.com', project: 'G/*', scope: { kind: 'group', path: 'G' } }, { forge: 'gitlab', host: 'gitlab.com', project: 'g/p' }],
+  })
+  expect(r.advanced.filter((a) => a.from === 'ready').length).toBe(1)
+  expect(new Set(r.advanced.map((a) => a.ref.project.toLowerCase() + a.ref.issue)).size).toBe(1)
+  expect(r.skipped).toEqual([])
+})

@@ -48,7 +48,8 @@ export function branchName(ref: JobRef, title: string, prefix: string): string {
 }
 
 export function workDir(root: string, ref: JobRef): string {
-  return `${root}/${ref.forge}/${ref.host}/${ref.project.replace(/\//g, '__')}/${ref.issue}`
+  // Lower-cased: forges match paths without case, so Acme/App and acme/app are one job.
+  return `${root}/${ref.forge}/${ref.host.toLowerCase()}/${ref.project.toLowerCase().replace(/\//g, '__')}/${ref.issue}`
 }
 
 export async function ensureCheckout(

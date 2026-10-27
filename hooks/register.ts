@@ -10,7 +10,7 @@ import { gate, type GateCtx } from '../src/gates'
 import type { Role } from '../src/config'
 import type { RunFn } from '../src/worktree'
 import { redact } from '../src/redact'
-import { forgeHostsOf, GITHUB_HOST, refLabel, resolveTokens, type Tokens } from '../src/hosts'
+import { forgeHostsOf, fullRef, GITHUB_HOST, refLabel, resolveTokens, type Tokens } from '../src/hosts'
 import { notifyInfo, slackEvents, slackPayload } from '../src/notify'
 import type { JobRef, Station } from '../src/types'
 import { dossierMarkdown, isWorking, issueUrl, jobKey, latestSpec, loadViews, mergeProgress, sameRef, spinnerSuffix, transitionToast } from '../src/ui/model'
@@ -51,6 +51,8 @@ type State = {
   repoErrors: string[]
   /** GITLAB_URL's host (default gitlab.com): GitLab entries and references without a host. */
   gitlabHost: string
+  /** First path segments that name a GitLab host without a dot (see Tokens.knownHosts). */
+  knownHosts: string[]
   workerId: string
   minutes: number
   paused: boolean
@@ -79,6 +81,7 @@ export const register: Register = (on, options) => {
     projects: repos.projects,
     repoErrors: repos.errors,
     gitlabHost: 'gitlab.com',
+    knownHosts: [],
     // Resolved at session start: the default 'worker' would be shared by every machine.
     workerId: typeof options.workerId === 'string' ? options.workerId.trim() : '',
     minutes: typeof options.tickMinutes === 'number' && options.tickMinutes > 0 ? options.tickMinutes : DEFAULT_TICK_MINUTES,
@@ -220,7 +223,7 @@ function uiActions($: Engine, st: State): Actions {
       await update($, detailAtom, () => detail)
     } catch (err) {
       await update($, detailAtom, () => ({ spec: '', dossier: '', review }))
-      await say(`could not read ${jobKey(ref)}: ${err instanceof Error ? err.message : String(err)}`)
+      await say(`could not read ${fullRef(ref)}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
   const back = async () => {
@@ -243,7 +246,7 @@ function uiActions($: Engine, st: State): Actions {
     $.clock.after(0, () => {
       void (async () => {
         const ticks = st.ticks
-        const ran = await handle({ kind: 'run', issue: jobKey(d.ref) }, await buildEnv($, st))
+        const ran = await handle({ kind: 'run', issue: fullRef(d.ref) }, await buildEnv($, st))
         if (st.ticks === ticks) {
           await say(`${d.text}\n${ran}`)
           await refresh($, st)
@@ -263,10 +266,10 @@ function uiActions($: Engine, st: State): Actions {
       await back()
       await say(null)
     },
-    approve: (ref) => decide({ kind: 'approve', issue: jobKey(ref) }),
+    approve: (ref) => decide({ kind: 'approve', issue: fullRef(ref) }),
     revise: (ref, notes) => {
       if (notes.trim() === '') return say('Revise needs notes: say what should change in the spec.')
-      return decide({ kind: 'revise', issue: jobKey(ref), notes: notes.trim() })
+      return decide({ kind: 'revise', issue: fullRef(ref), notes: notes.trim() })
     },
     refresh: () => refresh($, st),
   }
@@ -341,8 +344,9 @@ async function loadHosts($: Engine, st: State): Promise<Tokens> {
     gitlabUrl: (await $.env.get('GITLAB_URL')) ?? '',
     factory: (await $.env.get('FACTORY_TOKENS')) ?? '',
   })
-  const repos = parseRepos(st.reposRaw, { gitlabHost: tokens.gitlabHost })
+  const repos = parseRepos(st.reposRaw, { gitlabHost: tokens.gitlabHost, knownHosts: tokens.knownHosts })
   st.gitlabHost = tokens.gitlabHost
+  st.knownHosts = tokens.knownHosts
   st.projects = repos.projects
   st.repoErrors = [...repos.errors, ...tokens.errors]
   st.secrets = [...tokens.secrets, st.webhook].filter((x) => x !== '')
@@ -431,6 +435,7 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
     projects: st.projects,
     repoErrors: st.repoErrors,
     gitlabHost: st.gitlabHost,
+    knownHosts: st.knownHosts,
     forgeFor,
     deps: {
       run,
@@ -442,7 +447,7 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
       forgeHosts: forgeHostsOf(tokens, st.projects),
       now: () => Date.now(),
       onProgress: (ref, text) => {
-        $.ui.log(`factory ${refLabel(ref, st.gitlabHost)}: ${text}`, { to: 'debug' })
+        $.ui.log(`factory ${refLabel(ref, st.gitlabHost, st.knownHosts)}: ${text}`, { to: 'debug' })
         if (ui) enqueue(st, async () => {
           await progressed($, st, ref, text)
           // $.state writes redraw their readers; the brief also asks for an explicit invalidate here.

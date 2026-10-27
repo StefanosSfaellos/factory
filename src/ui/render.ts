@@ -49,11 +49,12 @@ const LINE: Station[] = ['ready', 'spec', 'awaiting-spec', 'design', 'plan', 'bu
 
 /**
  * The id part of a job's element keys: the issue number, or the full reference
- * (punctuation folded to `-`) when two configured repos share that number.
+ * (other characters escaped as `-<hex>-`) when two configured repos share that number.
  */
 export function uiId(jobs: JobView[], ref: JobRef): string {
   const clash = jobs.some((j) => j.ref.issue === ref.issue && !sameRef(j.ref, ref))
-  return clash ? `${ref.forge}-${ref.host}-${ref.project}-${ref.issue}`.replace(/[^A-Za-z0-9-]/g, '-') : String(ref.issue)
+  // Escaped, not folded: every character but [A-Za-z0-9] becomes -<hex>-, so distinct keys stay distinct.
+  return clash ? jobKey(ref).replace(/[^A-Za-z0-9]/g, (c) => `-${c.charCodeAt(0).toString(16)}-`) : String(ref.issue)
 }
 
 export function age(ms: number): string {

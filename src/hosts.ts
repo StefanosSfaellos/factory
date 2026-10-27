@@ -27,6 +27,18 @@ export type Tokens = {
   secrets: string[]
   /** The error for a repo or issue whose host has no token. */
   missing: (kind: ForgeKind, host: string) => string
+  /**
+   * First path segments that name a GitLab host even without a dot: the GITLAB_URL host,
+   * its `host:port` when GITLAB_URL has a port, and every FACTORY_TOKENS host.
+   */
+  knownHosts: string[]
+}
+
+/** `host:port` of a URL, lower-case; '' when it has no port. */
+function authorityOf(url: string): string {
+  const m = /^(?:[a-z][a-z0-9+.-]*:\/\/)?(?:[^@/]*@)?([^/?#]+)/i.exec(url)
+  const a = (m?.[1] ?? '').toLowerCase()
+  return a.includes(':') ? a : ''
 }
 
 /**
@@ -78,7 +90,8 @@ export function resolveTokens(env: { github?: string; gitlab?: string; gitlabUrl
     if (host === gitlabHost) return `no token for ${host}: set GITLAB_TOKEN or ${entry}`
     return `no token for ${host}: ${entry}`
   }
-  return { gitlabHost, hosts, errors, secrets: [...new Set(secrets.filter((s) => s !== ''))], missing }
+  const knownHosts = [...new Set([gitlabHost, authorityOf(gitlabUrl), ...Object.keys(hosts).filter((h) => h !== GITHUB_HOST)].filter((h) => h !== ''))]
+  return { gitlabHost, hosts, errors, secrets: [...new Set(secrets.filter((s) => s !== ''))], missing, knownHosts }
 }
 
 /** Hosts the builder gate treats as the forge: GitHub's, the GITLAB_URL host, every token host and every repo host. */
@@ -92,24 +105,39 @@ export function forgeHostsOf(tokens: Pick<Tokens, 'gitlabHost' | 'hosts'>, proje
 
 const USAGE = 'use github:owner/name, github:owner/*, gitlab:group/name, gitlab:<host>/group/name or gitlab:<host>/group/*'
 
+/** Whether a first path segment names a GitLab host: it has a dot, or is a known host (GITLAB_URL's, maybe dotless or with a port). */
+function isHostSegment(seg: string, gitlabHost: string, knownHosts: string[]): boolean {
+  const s = seg.toLowerCase()
+  return s.includes('.') || s === gitlabHost.toLowerCase() || knownHosts.some((h) => h.toLowerCase() === s)
+}
+
 /**
  * Reads the path of a `github:`/`gitlab:` entry or issue reference. A first segment
- * containing a dot is a host; without one, GitHub means github.com and GitLab the
- * GITLAB_URL host. A trailing `*` is a wildcard when `wildcard` allows it.
+ * containing a dot is a host, and so (for GitLab) is one equal to a known host
+ * (`knownHosts`, e.g. a dotless GITLAB_URL host or its `host:port`). Without one, GitHub
+ * means github.com and GitLab the GITLAB_URL host. A trailing `*` is a wildcard when
+ * `wildcard` allows it.
  */
 export function parsePath(
   forge: ForgeKind,
   path: string,
   gitlabHost: string,
   wildcard: boolean,
+  knownHosts: string[] = [],
 ): { host: string; project: string; scope?: ListScope } | { error: string } {
   const segs = path.split('/')
-  if (segs.some((s) => s === '' || /[\s#:]/.test(s))) return { error: USAGE }
+  if (segs.some((s) => s === '' || /[\s#]/.test(s))) return { error: USAGE }
   let host = forge === 'github' ? GITHUB_HOST : gitlabHost
-  if (segs[0].includes('.')) {
+  const first = segs[0].toLowerCase()
+  const known = forge === 'gitlab' && (first === gitlabHost.toLowerCase() || knownHosts.some((h) => h.toLowerCase() === first))
+  if (known) {
+    segs.shift()
+    host = hostOf(first)
+  } else if (first.includes('.')) {
     host = segs.shift()!.toLowerCase()
     if (!HOST_NAME.test(host)) return { error: `"${host}" is not a host name` }
   }
+  if (segs.some((s) => s.includes(':'))) return { error: USAGE }
   if (forge === 'github' && host !== GITHUB_HOST) return { error: `GitHub entries are on ${GITHUB_HOST} only` }
   if (forge === 'gitlab' && host === GITHUB_HOST) return { error: `${GITHUB_HOST} is GitHub; use github:owner/name` }
   if (segs.length === 0) return { error: USAGE }
@@ -127,17 +155,17 @@ export function parsePath(
 }
 
 /** Reads the plugin option `repos`; `gitlabHost` is what a GitLab entry without a host means. */
-export function parseRepoList(list: string, gitlabHost: string): { projects: Project[]; errors: string[] } {
+export function parseRepoList(list: string, gitlabHost: string, knownHosts: string[] = []): { projects: Project[]; errors: string[] } {
   const projects: Project[] = []
   const errors: string[] = []
   const seen = new Set<string>()
   for (const raw of list.split(',').map((s) => s.trim()).filter(Boolean)) {
     const m = /^(github|gitlab):(.+)$/.exec(raw)
-    const r = m ? parsePath(m[1] as ForgeKind, m[2], gitlabHost, true) : { error: USAGE }
+    const r = m ? parsePath(m[1] as ForgeKind, m[2], gitlabHost, true, knownHosts) : { error: USAGE }
     if ('error' in r) { errors.push(`bad repo "${raw}" (${r.error})`); continue }
     const p: Project = { forge: m![1] as ForgeKind, host: r.host, project: r.project }
     if (r.scope) p.scope = r.scope
-    const key = `${p.forge}:${p.host}/${p.project}`
+    const key = `${p.forge}:${p.host}/${p.project}`.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
     projects.push(p)
@@ -149,23 +177,32 @@ export function parseRepoList(list: string, gitlabHost: string): { projects: Pro
 // Keys and labels
 
 /**
- * A job's identity: `github:owner/name#42` or `gitlab:<host>/group/name#42`. GitLab keys
- * always name the host, so two hosts never share a key; every key is a valid full issue
- * reference.
+ * A full issue reference that keeps the project's case (for API calls and commands):
+ * `github:owner/name#42` or `gitlab:<host>/group/name#42`. GitLab references always name
+ * the host, so they read back the same on any configuration.
  */
-export const jobKey = (r: JobRef) => (r.forge === 'github' ? `github:${r.project}#${r.issue}` : `gitlab:${r.host}/${r.project}#${r.issue}`)
+export const fullRef = (r: JobRef) => (r.forge === 'github' ? `github:${r.project}#${r.issue}` : `gitlab:${r.host}/${r.project}#${r.issue}`)
 
-export const sameRef = (a: JobRef, b: JobRef) => a.forge === b.forge && a.host === b.host && a.project === b.project && a.issue === b.issue
+/**
+ * A job's identity: `fullRef` lower-cased. Forges match host and project paths without
+ * regard to case, so `github:Acme/App#1` and `github:acme/app#1` are one job (one lease,
+ * one work dir). Still a valid full issue reference.
+ */
+export const jobKey = (r: JobRef) => fullRef(r).toLowerCase()
+
+export const sameRef = (a: JobRef, b: JobRef) => jobKey(a) === jobKey(b)
 
 /**
  * How a repo entry is shown: GitHub without its host; GitLab without its host only when
- * the host is the GITLAB_URL host (which is what a GitLab reference without a host means),
- * so every label reads back as the same entry.
+ * the host is the GITLAB_URL host (which is what a GitLab reference without a host means)
+ * and the project's first segment would not itself read as a host (a dot, or a known
+ * host). So every label reads back as the same entry.
  */
-export function entryLabel(p: Pick<Project, 'forge' | 'host' | 'project'>, gitlabHost: string): string {
-  if (p.forge === 'github' || p.host === gitlabHost) return `${p.forge}:${p.project}`
-  return `${p.forge}:${p.host}/${p.project}`
+export function entryLabel(p: Pick<Project, 'forge' | 'host' | 'project'>, gitlabHost: string, knownHosts: string[] = []): string {
+  if (p.forge === 'github') return `${p.forge}:${p.project}`
+  const short = p.host === gitlabHost && !isHostSegment(p.project.split('/')[0], gitlabHost, knownHosts)
+  return short ? `${p.forge}:${p.project}` : `${p.forge}:${p.host}/${p.project}`
 }
 
 /** How a job is shown to people: `gitlab:group/name#42` on the GITLAB_URL host, `gitlab:<host>/group/name#42` elsewhere. */
-export const refLabel = (r: JobRef, gitlabHost: string) => `${entryLabel(r, gitlabHost)}#${r.issue}`
+export const refLabel = (r: JobRef, gitlabHost: string, knownHosts: string[] = []) => `${entryLabel(r, gitlabHost, knownHosts)}#${r.issue}`

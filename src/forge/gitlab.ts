@@ -32,7 +32,9 @@ export function gitlabForge(http: HttpFn, opts: { baseUrl: string; token: string
   }
 
   async function call(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<any> {
-    const headers: Record<string, string> = { 'PRIVATE-TOKEN': opts.token, Accept: 'application/json' }
+    // Authorization, not PRIVATE-TOKEN: fetch drops Authorization on a cross-origin
+    // redirect, but would carry a custom header to the other origin.
+    const headers: Record<string, string> = { Authorization: `Bearer ${opts.token}`, Accept: 'application/json' }
     const req: { url: string; method: 'GET' | 'POST' | 'PUT'; headers: Record<string, string>; body?: string } = {
       url: api + path,
       method,
@@ -190,7 +192,7 @@ export function gitlabForge(http: HttpFn, opts: { baseUrl: string; token: string
 
     async readFile(project, path, ref) {
       const p = `/projects/${pid(project)}/repository/files/${encodeURIComponent(path)}/raw?ref=${encodeURIComponent(ref)}`
-      const res = await http({ url: api + p, method: 'GET', headers: { 'PRIVATE-TOKEN': opts.token } })
+      const res = await http({ url: api + p, method: 'GET', headers: { Authorization: `Bearer ${opts.token}` } })
       if (res.status === 404) return null
       if (res.status < 200 || res.status >= 300) throw new ForgeError(res.status, `GitLab GET ${p} failed: ${res.status}`)
       return res.text
