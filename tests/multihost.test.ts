@@ -163,17 +163,27 @@ function fakeHttp(routes: (url: string) => unknown): { http: HttpFn; reqs: Req[]
 const ACTIVE = ['ready', 'spec', 'awaiting-spec', 'design', 'plan', 'build', 'verify', 'review', 'approve', 'mr-open', 'blocked']
 const enc = (s: string) => encodeURIComponent(`factory::${s}`)
 
+const MEMBERS = 'projects?membership=true&min_access_level=30&simple=true'
+/** GitLab's member-projects listing, filtered by min_access_level the way the server does. */
+function membersRoute(api: string, projects: { id: number; path: string; level: number }[], url: string): unknown {
+  const m = new RegExp(`^${api.replace(/[.]/g, '\\.')}/projects\\?membership=true&min_access_level=(\\d+)&simple=true&per_page=100&page=(\\d+)$`).exec(url)
+  if (!m) return undefined
+  const all = projects.filter((p) => p.level >= Number(m[1])).map((p) => ({ id: p.id, path_with_namespace: p.path }))
+  return all.slice((Number(m[2]) - 1) * 100, Number(m[2]) * 100)
+}
+
 test('GitLab listJobsIn all: one paged query per active station label, union and dedupe', async () => {
   const api = 'https://lab.a.gr/api/v4'
+  const members = [{ id: 1, path: 'g/a', level: 30 }, { id: 2, path: 'g/sub/b', level: 40 }, { id: 3, path: 'g/c', level: 50 }]
   const { http, reqs } = fakeHttp((url) => {
     if (url === `${api}/issues?scope=all&state=opened&labels=${enc('ready')}&per_page=100&page=1`) {
       return Array.from({ length: 100 }, (_, i) => ({ iid: i + 1, project_id: 1, references: { full: `g/a#${i + 1}` } }))
     }
-    if (url === `${api}/issues?scope=all&state=opened&labels=${enc('ready')}&per_page=100&page=2`) return [{ iid: 101, references: { full: 'g/sub/b#101' } }]
+    if (url === `${api}/issues?scope=all&state=opened&labels=${enc('ready')}&per_page=100&page=2`) return [{ iid: 101, project_id: 2, references: { full: 'g/sub/b#101' } }]
     // #1 of g/a also carries factory::build (an invalid job): listed once.
-    if (url === `${api}/issues?scope=all&state=opened&labels=${enc('build')}&per_page=100&page=1`) return [{ iid: 1, references: { full: 'g/a#1' } }, { iid: 1, references: { full: 'g/c#1' } }]
+    if (url === `${api}/issues?scope=all&state=opened&labels=${enc('build')}&per_page=100&page=1`) return [{ iid: 1, project_id: 1, references: { full: 'g/a#1' } }, { iid: 1, project_id: 3, references: { full: 'g/c#1' } }]
     if (url.startsWith(`${api}/issues?`)) return []
-    return undefined
+    return membersRoute(api, members, url)
   })
   const f = gitlabForge(http, { baseUrl: 'https://lab.a.gr', token: 't' })
   const refs = await f.listJobsIn({ kind: 'all' })
@@ -187,16 +197,16 @@ test('GitLab listJobsIn all: one paged query per active station label, union and
   expect(reqs.some((q) => q.url.includes(enc('done')))).toBe(false)
 })
 
-test('GitLab listJobsIn group: include_subgroups; project path falls back to project_id, cached', async () => {
+test('GitLab listJobsIn group: include_subgroups; project path falls back to the member listing', async () => {
   const api = 'https://gitlab.com/api/v4'
+  // 150 member projects: the listing is paged.
+  const members = [...Array.from({ length: 148 }, (_, i) => ({ id: 1000 + i, path: `x/p${i}`, level: 30 })), { id: 77, path: 'team/sub/x', level: 30 }, { id: 78, path: 'team/sub/y', level: 30 }]
   const { http, reqs } = fakeHttp((url) => {
     if (url === `${api}/groups/team%2Fsub/issues?state=opened&include_subgroups=true&labels=${enc('plan')}&per_page=100&page=1`) {
       return [{ iid: 3, project_id: 77 }, { iid: 4, project_id: 77 }, { iid: 5, project_id: 78, references: {} }]
     }
-    if (url === `${api}/projects/77`) return { path_with_namespace: 'team/sub/x' }
-    if (url === `${api}/projects/78`) return { path_with_namespace: 'team/sub/y' }
     if (url.startsWith(`${api}/groups/team%2Fsub/issues?`)) return []
-    return undefined
+    return membersRoute(api, members, url)
   })
   const f = gitlabForge(http, { baseUrl: 'https://gitlab.com', token: 't' })
   const refs = await f.listJobsIn({ kind: 'group', path: 'team/sub' })
@@ -205,8 +215,76 @@ test('GitLab listJobsIn group: include_subgroups; project path falls back to pro
     { forge: 'gitlab', host: 'gitlab.com', project: 'team/sub/x', issue: 4 },
     { forge: 'gitlab', host: 'gitlab.com', project: 'team/sub/y', issue: 5 },
   ])
-  expect(reqs.filter((q) => q.url === `${api}/projects/77`).length).toBe(1)
+  expect(reqs.some((q) => /\/projects\/\d+$/.test(q.url))).toBe(false)
+  expect(reqs.filter((q) => q.url.includes(MEMBERS)).map((q) => q.url.slice(-6))).toEqual(['page=1', 'page=2', 'page=3'])
   expect(reqs.every((q) => q.headers['PRIVATE-TOKEN'] === 't')).toBe(true)
+})
+
+// Fix 1: GitLab wildcards cover only projects where the token's user has Developer (30) access or more.
+function accessWorld() {
+  const api = 'https://lab.a.gr/api/v4'
+  const members = [{ id: 1, path: 'team/dev', level: 30 }, { id: 2, path: 'team/rep', level: 20 }]
+  // project 3 (others/public) is public: its issues show in /issues?scope=all, but it is no member project.
+  const issues = [
+    { iid: 1, project_id: 1, references: { full: 'team/dev#1' } },
+    { iid: 2, project_id: 2, references: { full: 'team/rep#2' } },
+    { iid: 3, project_id: 3, references: { full: 'others/public#3' } },
+  ]
+  return fakeHttp((url) => {
+    if (url === `${api}/issues?scope=all&state=opened&labels=${enc('ready')}&per_page=100&page=1`) return issues
+    if (url === `${api}/groups/team/issues?state=opened&include_subgroups=true&labels=${enc('ready')}&per_page=100&page=1`) return issues.slice(0, 2)
+    if (url.includes('/issues?')) return []
+    return membersRoute(api, members, url)
+  })
+}
+
+test('GitLab wildcard: a labelled issue in a public project the user is no member of is ignored', async () => {
+  const f = gitlabForge(accessWorld().http, { baseUrl: 'https://lab.a.gr', token: 't' })
+  expect((await f.listJobsIn({ kind: 'all' })).map((r) => r.project)).not.toContain('others/public')
+})
+
+test('GitLab wildcard: a member project with Reporter (20) access is ignored', async () => {
+  const { http, reqs } = accessWorld()
+  const f = gitlabForge(http, { baseUrl: 'https://lab.a.gr', token: 't' })
+  expect((await f.listJobsIn({ kind: 'all' })).map((r) => r.project)).not.toContain('team/rep')
+  expect((await f.listJobsIn({ kind: 'group', path: 'team' })).map((r) => r.project)).not.toContain('team/rep')
+  expect(reqs.some((q) => q.url.endsWith(`/api/v4/${MEMBERS}&per_page=100&page=1`))).toBe(true)
+})
+
+test('GitLab wildcard: a Developer (30) member project is included; the member listing is read once per tick', async () => {
+  const { http, reqs } = accessWorld()
+  const f = gitlabForge(http, { baseUrl: 'https://lab.a.gr', token: 't' })
+  expect(await f.listJobsIn({ kind: 'all' })).toEqual([{ forge: 'gitlab', host: 'lab.a.gr', project: 'team/dev', issue: 1 }])
+  expect(await f.listJobsIn({ kind: 'group', path: 'team' })).toEqual([{ forge: 'gitlab', host: 'lab.a.gr', project: 'team/dev', issue: 1 }])
+  expect(reqs.filter((q) => q.url.includes(`${MEMBERS}&per_page=100&page=1`)).length).toBe(1)
+})
+
+test('GitLab wildcard: a failing membership call yields no jobs and an error (fail closed)', async () => {
+  const api = 'https://lab.a.gr/api/v4'
+  const { http } = fakeHttp((url) => {
+    if (url.includes('/projects?membership=')) return undefined // 404
+    if (url.endsWith('/user')) return { username: 'bot' }
+    if (url.includes('/issues?') && url.includes(enc('ready')) && url.endsWith('page=1')) return [{ iid: 1, project_id: 1, references: { full: 'team/dev#1' } }]
+    if (url.includes('/issues?')) return []
+    return undefined
+  })
+  const f = gitlabForge(http, { baseUrl: 'https://lab.a.gr', token: 't' })
+  let err = ''
+  try { await f.listJobsIn({ kind: 'all' }) } catch (e) { err = String(e) }
+  expect(err).toContain('membership')
+  // through the commands: status and tick show the error line and run nothing
+  const env = {
+    projects: parseRepos('gitlab:lab.a.gr/*').projects, repoErrors: [], gitlabHost: 'gitlab.com',
+    forgeFor: () => ({ forge: f }), deps: { secrets: [], workerId: 'w' }, isPaused: () => false,
+    loadConfigFor: () => async () => parseRepoConfig('forge: gitlab\ntest: x\n'), lock: { busy: false }, parallel: 2,
+  } as unknown as Env
+  const st = await handle({ kind: 'status' }, env)
+  expect(st).toContain('0 jobs')
+  expect(st).toMatch(/gitlab:lab\.a\.gr\/\*: error: .*membership/)
+  const tk = await handle({ kind: 'tick' }, env)
+  expect(tk).toContain('advanced 0 jobs')
+  expect(tk).toMatch(/gitlab:lab\.a\.gr\/\*: skipped \(list failed: .*membership/)
+  void api
 })
 
 test('GitLab refs, clone and public URLs use the instance host', async () => {

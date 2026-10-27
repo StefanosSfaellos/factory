@@ -15,8 +15,21 @@ export function gitlabForge(http: HttpFn, opts: { baseUrl: string; token: string
   const host = root.replace(/^https?:\/\//, '')
   /** The instance's lower-case host name: every JobRef it makes carries it. */
   const hostName = hostOf(root)
-  /** project_id -> path_with_namespace, for issues listed without `references.full`. */
-  const projectPaths = new Map<number, Promise<string>>()
+  /**
+   * The projects where the token's user is a member with Developer (30) access or more,
+   * id -> path_with_namespace. Read once per forge instance (hooks/register.ts builds the
+   * forges afresh for every tick); a failed read is not kept, so the next tick asks again.
+   */
+  let members: Promise<Map<number, string>> | undefined
+  const memberProjects = (): Promise<Map<number, string>> => {
+    members ??= paged('/projects?membership=true&min_access_level=30&simple=true')
+      .then((ps) => new Map(ps.map((p: any) => [Number(p.id), String(p.path_with_namespace ?? '')] as [number, string])))
+      .catch((e) => {
+        members = undefined
+        throw new ForgeError(e instanceof ForgeError ? e.status : 0, `GitLab membership check failed, wildcard skipped: ${e instanceof Error ? e.message : String(e)}`)
+      })
+    return members
+  }
 
   async function call(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<any> {
     const headers: Record<string, string> = { 'PRIVATE-TOKEN': opts.token, Accept: 'application/json' }
@@ -79,23 +92,22 @@ export function gitlabForge(http: HttpFn, opts: { baseUrl: string; token: string
       const base = scope.kind === 'all'
         ? '/issues?scope=all&state=opened'
         : `/groups/${encodeURIComponent(scope.path)}/issues?state=opened&include_subgroups=true`
-      const pathOf = async (i: any): Promise<string> => {
+      // Fail closed: without the member list a wildcard yields nothing (the error reaches tick/status).
+      // Only issues of projects where the user has Developer access or more count; public
+      // projects of others on the same instance are left alone.
+      const mine = await memberProjects()
+      const pathOf = (i: any): string => {
+        const id = Number(i.project_id)
+        if (!mine.has(id)) return ''
         const full = i.references?.full
         if (typeof full === 'string' && full.includes('#')) return full.replace(/#\d+$/, '')
-        const id = Number(i.project_id)
-        if (!Number.isSafeInteger(id)) return ''
-        if (!projectPaths.has(id)) {
-          const p = call('GET', `/projects/${id}`).then((x) => String(x?.path_with_namespace ?? ''))
-          p.catch(() => projectPaths.delete(id))
-          projectPaths.set(id, p)
-        }
-        return projectPaths.get(id)!
+        return mine.get(id)!
       }
       const seen = new Set<string>()
       const refs: JobRef[] = []
       for (const label of ACTIVE_LABELS) {
         for (const i of await paged(`${base}&labels=${encodeURIComponent(label)}`)) {
-          const project = await pathOf(i)
+          const project = pathOf(i)
           const key = `${project}#${i.iid}`
           if (project === '' || seen.has(key)) continue
           seen.add(key)
