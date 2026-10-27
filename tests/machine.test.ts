@@ -4,7 +4,7 @@ import type { Job, Comment, Verdict } from '../src/types'
 import type { Role } from '../src/config'
 
 const job = (labels: string[], comments: Comment[] = []): Job => ({
-  ref: { forge: 'github', project: 'o/r', issue: 1 },
+  ref: { forge: 'github', host: 'github.com', project: 'o/r', issue: 1 },
   title: 't', body: '', labels, comments,
 })
 const c = (id: string, body: string, createdAt: string): Comment => ({ id, body, createdAt, author: 'u' })

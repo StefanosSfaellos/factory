@@ -19,7 +19,7 @@ function fake(routes: (req: Req) => { status?: number; json?: unknown; text?: st
   }
   return { calls, forge: gitlabForge(http, { baseUrl: BASE, token: 'tok' }) }
 }
-const ref = { forge: 'gitlab' as const, project: 'grp/app', issue: 7 }
+const ref = { forge: 'gitlab' as const, host: 'lab.ironcloud.gr', project: 'grp/app', issue: 7 }
 
 test('getJob maps issue and notes, sorted, system notes excluded', async () => {
   const { forge, calls } = fake((r) => {
@@ -43,7 +43,8 @@ test('getJob maps issue and notes, sorted, system notes excluded', async () => {
     { id: '2', body: 'first', createdAt: '2026-01-01T12:00:00Z', author: 'amy', trusted: true },
     { id: '3', body: 'later', createdAt: '2026-01-02T00:00:00Z', author: 'bob', trusted: true },
   ])
-  expect(calls[0].headers['PRIVATE-TOKEN']).toBe('tok')
+  expect(calls[0].headers.Authorization).toBe('Bearer tok')
+  expect(calls[0].headers['PRIVATE-TOKEN']).toBeUndefined()
 })
 
 test('setStation sends one PUT removing the other 12 labels', async () => {
@@ -113,7 +114,7 @@ test('comment, editComment, createIssue, whoami, cloneUrl', async () => {
   const put = calls.find((c) => c.method === 'PUT')!
   expect(put.url).toBe(`${A}/projects/grp%2Fapp/issues/7/notes/9`)
   expect(JSON.parse(put.body!)).toEqual({ body: 'edited' })
-  expect(await forge.createIssue('grp/app', 't', 'b')).toEqual({ forge: 'gitlab', project: 'grp/app', issue: 12 })
+  expect(await forge.createIssue('grp/app', 't', 'b')).toEqual({ forge: 'gitlab', host: 'lab.ironcloud.gr', project: 'grp/app', issue: 12 })
   expect(forge.cloneUrl('grp/app')).toBe('https://oauth2:tok@lab.ironcloud.gr/grp/app.git')
 })
 
@@ -134,7 +135,8 @@ test('readFile GETs the raw file at a ref; 404 -> null; other errors throw', asy
   expect(await forge.readFile('grp/app', 'ci/.factory.yml', 'main')).toBe('forge: gitlab\ntest: "npm test"\n')
   expect(calls[0].method).toBe('GET')
   expect(calls[0].url).toBe(`${A}/projects/grp%2Fapp/repository/files/ci%2F.factory.yml/raw?ref=main`)
-  expect(calls[0].headers['PRIVATE-TOKEN']).toBe('tok')
+  expect(calls[0].headers.Authorization).toBe('Bearer tok')
+  expect(calls[0].headers['PRIVATE-TOKEN']).toBeUndefined()
   const missing = fake(() => ({ status: 404, json: { message: '404 File Not Found' } }))
   expect(await missing.forge.readFile('grp/app', '.factory.yml', 'main')).toBe(null)
   const broken = fake(() => ({ status: 500, text: 'oops' }))

@@ -19,7 +19,7 @@ function fake(routes: (req: Req) => { status?: number; json?: unknown; text?: st
   }
   return { calls, forge: githubForge(http, { token: 'tok' }) }
 }
-const ref = { forge: 'github' as const, project: 'own/app', issue: 7 }
+const ref = { forge: 'github' as const, host: 'github.com', project: 'own/app', issue: 7 }
 const lab = (...n: string[]) => n.map((name) => ({ name }))
 
 test('getJob maps issue and comments, sorted, trusted by author_association', async () => {
@@ -137,8 +137,8 @@ test('listJobs pages, filters PRs, skips done/unlabelled', async () => {
   })
   const jobs = await forge.listJobs('own/app')
   expect(jobs).toEqual([
-    { forge: 'github', project: 'own/app', issue: 1 },
-    { forge: 'github', project: 'own/app', issue: 4 },
+    { forge: 'github', host: 'github.com', project: 'own/app', issue: 1 },
+    { forge: 'github', host: 'github.com', project: 'own/app', issue: 4 },
   ])
   expect(calls.length).toBe(3)
   expect(calls[0].url).toContain(`${R}/issues?state=open`)
@@ -161,7 +161,7 @@ test('comment, editComment, createIssue, whoami, cloneUrl', async () => {
   const patch = calls.find((c) => c.method === 'PATCH')!
   expect(patch.url).toBe(`${R}/issues/comments/9`)
   expect(JSON.parse(patch.body!)).toEqual({ body: 'edited' })
-  expect(await forge.createIssue('own/app', 't', 'b')).toEqual({ forge: 'github', project: 'own/app', issue: 12 })
+  expect(await forge.createIssue('own/app', 't', 'b')).toEqual({ forge: 'github', host: 'github.com', project: 'own/app', issue: 12 })
   expect(forge.cloneUrl('own/app')).toBe('https://x-access-token:tok@github.com/own/app.git')
 })
 

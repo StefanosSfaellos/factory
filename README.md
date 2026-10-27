@@ -20,15 +20,16 @@ Then enable it. The plugin root is the repository root.
 
 ## Setup
 
-1. **Tokens** (environment of the process that runs Claude Code):
-   - `GITHUB_TOKEN`: a token that can read the repo and write issues, branches and pull requests.
-   - `GITLAB_TOKEN`: same for GitLab (scope `api`). `GITLAB_URL` defaults to `https://gitlab.com`; set it for a self-hosted instance.
+1. **Tokens** (environment of the process that runs Claude Code; see [Repos and tokens](#repos-and-tokens)):
+   - `GITHUB_TOKEN`: github.com.
+   - `GITLAB_TOKEN` + `GITLAB_URL`: one GitLab host (`GITLAB_URL` defaults to `https://gitlab.com`).
+   - `FACTORY_TOKENS`: any number of hosts, `host=token,host=token`.
    Tokens are never written to comments, logs or the UI; agent child processes do not receive them.
 2. **Plugin options** (`userConfig`, set when you enable the plugin):
 
    | Option | Type | Default | Meaning |
    |---|---|---|---|
-   | `repos` | string | empty | Comma-separated, e.g. `github:owner/name,gitlab:group/name` |
+   | `repos` | string | empty | Comma-separated entries, e.g. `github:owner/*,gitlab:group/name,gitlab:lab.example.gr/team/*` (forms below) |
    | `workerId` | string | `worker` | Id used when taking leases; left as `worker`, each session uses `<host>-<random>` |
    | `tickMinutes` | number | 10 | How often the session ticker polls the forges |
    | `parallel` | number | 2 | Global cap on jobs a tick leases and advances at once |
@@ -36,6 +37,58 @@ Then enable it. The plugin root is the repository root.
 
 3. **`.factory.yml`** at the root of each repository's default branch (see below).
 4. Label an issue `factory::ready` (or run `/factory new <title>`).
+
+## Repos and tokens
+
+One session can work github.com and several GitLab servers at once.
+
+**`repos` entries** (comma-separated):
+
+| Entry | Means |
+|---|---|
+| `github:owner/name` | that repository |
+| `github:owner/*` | every repository of that user or organisation the token can see |
+| `github:*` | every repository the token can see |
+| `gitlab:group/name` | that project on the `GITLAB_URL` host (`gitlab.com` by default) |
+| `gitlab:group/*`, `gitlab:*` | that group (with its subgroups), or every project the token can see, on the `GITLAB_URL` host |
+| `gitlab:<host>/group/sub/name` | that project on `<host>`, e.g. `gitlab:lab.example.gr/team/app` |
+| `gitlab:<host>/group/*` | that group on `<host>`, with its subgroups |
+| `gitlab:<host>/*` | every project on `<host>` the token can see |
+
+A first path segment that contains a dot is a host, and so is one equal to the `GITLAB_URL` host (which may have no dot, e.g. `http://gitlab:8080`: write `gitlab:gitlab/group/name` or `gitlab:gitlab:8080/group/name`). A GitLab group in the first segment that contains a dot, or is named like that host, needs the host written first: `gitlab:gitlab.com/my.group/app`. Host and project paths are matched without regard to case (`github:acme/app` and `github:Acme/*` find one job). A wildcard costs one paged search per station label per tick (11 queries), and the factory only ever touches a project when one of its open issues carries a `factory::` label. A labelled issue in a project without a `.factory.yml` is blocked with a comment saying so. GitLab wildcards (`gitlab:<host>/*`, `gitlab:<host>/group/*`) cover only projects where the token's user is a member with **Developer access or more**, and in those only open issues carrying a `factory::` label: public projects of others on the same instance, and projects where the user is only Guest or Reporter, are ignored. The member list is read once per tick and host; if that read fails, the wildcard yields no jobs that tick and the error shows in `/factory status` and the tick output. GitHub wildcards (`github:*`, `github:owner/*`) use `/issues?filter=all`, which GitHub already limits to repositories the user owns, is a collaborator on, or reaches through an organisation membership. On gitlab.com prefer group wildcards (`gitlab:group/*`) to `gitlab:*`: the whole-instance search returns every public issue carrying a `factory::` label before the membership filter drops them, which is slow and wasteful there.
+
+**Tokens**, one per host:
+
+| Variable | Host |
+|---|---|
+| `GITHUB_TOKEN` | `github.com` |
+| `GITLAB_TOKEN` | the host of `GITLAB_URL` (default `https://gitlab.com`) |
+| `FACTORY_TOKENS` | `host=token,host=token`: host names without `https://` (compared lower-case); an entry here overrides the two above for its host. `github.com=<token>` is GitHub; any other host is a GitLab server, always reached over `https://<host>`. A FACTORY_TOKENS host must contain a dot and have no port; a GitLab on a dotless host, a port or plain http goes in `GITLAB_URL` + `GITLAB_TOKEN` |
+
+Every token needs to read the repositories and write issues, branches and merge/pull requests (GitLab scope `api`). Wildcards need a **personal or group access token**: a project access token sees only its own project. A repo whose host has no token is reported in `/factory status` and in each tick (`no token for lab.example.gr: add "lab.example.gr=<token>" to FACTORY_TOKENS`); the other repos still run.
+
+Full `~/.claude/settings.json` example:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/software-factory",
+    "GITHUB_TOKEN": "ghp_...",
+    "GITLAB_URL": "https://gitlab.com",
+    "GITLAB_TOKEN": "glpat-...",
+    "FACTORY_TOKENS": "lab.example.gr=glpat-...,git.example.com=glpat-..."
+  },
+  "pluginConfigs": {
+    "software-factory@inline": {
+      "options": {
+        "repos": "github:acme/*,gitlab:group/app,gitlab:lab.example.gr/team/*,gitlab:git.example.com/ops/infra"
+      }
+    }
+  }
+}
+```
+
+**Issue references.** A job is shown as `github:owner/name#42`, as `gitlab:group/name#42` when it is on the `GITLAB_URL` host, and as `gitlab:<host>/group/name#42` on any other GitLab host. A GitLab project whose first segment has a dot (or is named like the `GITLAB_URL` host) is always shown with its host. Every form shown can be typed back into `/factory run|status|approve|revise`. A full reference works on any project the host's token can reach, whether or not `repos` lists it: `/factory run gitlab:lab.example.gr/other/app#3` labels and runs that issue. `#42` alone works only when exactly one repo is configured and it is not a wildcard.
 
 ## How a job moves
 
@@ -75,13 +128,13 @@ Only trusted commenters count. On GitHub: `OWNER`, `MEMBER` or `COLLABORATOR`. O
 | `/factory help` | Lists the commands |
 | `/factory tick` | One pass over the configured repos |
 | `/factory new <title> [-- body]` | Creates an issue labelled `factory::ready` |
-| `/factory run <issue>` | Puts an issue on the line and ticks it now |
+| `/factory run <issue>` | Puts an issue on the line and ticks it now (a full reference works on any project the token can reach, not only those in `repos`) |
 | `/factory approve <issue>` | Approves the spec |
 | `/factory revise <issue> <notes>` | Sends the spec back with notes |
 | `/factory status [issue]` | Text summary of the jobs |
 | `/factory pause` / `/factory resume` | Stops or starts the session ticker |
 
-An issue is `#42` when exactly one repo is configured, otherwise `github:owner/name#42` or `gitlab:group/name#42`.
+An issue is `#42` when exactly one repo (not a wildcard) is configured, otherwise `github:owner/name#42`, `gitlab:group/name#42` (the `GITLAB_URL` host) or `gitlab:<host>/group/name#42`.
 
 ## Running it
 
@@ -139,7 +192,7 @@ The builder is always allowed `Bash` (plus the repo's `allowedTools`), because a
 
 ## Deployment and security
 
-Each station runs as a child `claude -p` session with this plugin loaded. Inside it, the plugin's `tool.call` gates refuse pushes, merge/pull-request creation, edits outside the job's directory, reads outside it or under `/proc`, and any shell or edit for the read-only roles. Children, and the repository's `setup`/`test` commands the verify station runs, start without `GITHUB_TOKEN`/`GITLAB_TOKEN`/`GITLAB_URL`/`FACTORY_GITLAB_TOKEN`; children also get Claude Code's Bash sandbox where the host supports it; the factory does every token-bearing git operation itself in a fresh, throw-away bare repository.
+Each station runs as a child `claude -p` session with this plugin loaded. Inside it, the plugin's `tool.call` gates refuse pushes, merge/pull-request creation, edits outside the job's directory, reads outside it or under `/proc`, and any shell or edit for the read-only roles. Children, and the repository's `setup`/`test` commands the verify station runs, start without `GITHUB_TOKEN`/`GITLAB_TOKEN`/`GITLAB_URL`/`FACTORY_GITLAB_TOKEN`/`FACTORY_TOKENS`; children also get Claude Code's Bash sandbox where the host supports it; the factory does every token-bearing git operation itself in a fresh, throw-away bare repository.
 
 Mods run with your permissions, and the child sessions run with `--permission-mode acceptEdits`. Protect the default branch on the forge too (branch protection, required reviews): the factory only pushes its own branch and opens a merge/pull request, but the forge is the real backstop.
 

@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { slackPayload, slackEvents, notifyInfo } from '../src/notify'
 import type { JobRef } from '../src/types'
 
-const ref: JobRef = { forge: 'gitlab', project: 'g/p', issue: 7 }
+const ref: JobRef = { forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: 7 }
 
 test('mr-opened payload carries the title and the URL', () => {
   const p = JSON.parse(slackPayload({ ref, title: 'Add login', kind: 'mr-opened', url: 'https://x/mr/1' }))

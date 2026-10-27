@@ -1,5 +1,6 @@
 import { redact } from '../redact'
 import type { JobRef, Station } from '../types'
+import { entryLabel, refLabel } from '../hosts'
 import { bandText, jobKey, sameRef, type JobView } from './model'
 
 // Trees for the band and the pane. Pure: the element constructors come in from
@@ -38,6 +39,8 @@ export type PaneOpts = {
   message?: string
   /** Projects that could not be read. */
   errors?: string[]
+  /** GITLAB_URL's host: GitLab jobs on it are shown without their host. Default gitlab.com. */
+  gitlabHost?: string
   /** Set when there is nothing to work: no repos configured. */
   empty?: string
 }
@@ -46,11 +49,12 @@ const LINE: Station[] = ['ready', 'spec', 'awaiting-spec', 'design', 'plan', 'bu
 
 /**
  * The id part of a job's element keys: the issue number, or the full reference
- * (punctuation folded to `-`) when two configured repos share that number.
+ * (other characters escaped as `-<hex>-`) when two configured repos share that number.
  */
 export function uiId(jobs: JobView[], ref: JobRef): string {
   const clash = jobs.some((j) => j.ref.issue === ref.issue && !sameRef(j.ref, ref))
-  return clash ? `${ref.forge}-${ref.project}-${ref.issue}`.replace(/[^A-Za-z0-9-]/g, '-') : String(ref.issue)
+  // Escaped, not folded: every character but [A-Za-z0-9] becomes -<hex>-, so distinct keys stay distinct.
+  return clash ? jobKey(ref).replace(/[^A-Za-z0-9]/g, (c) => `-${c.charCodeAt(0).toString(16)}-`) : String(ref.issue)
 }
 
 export function age(ms: number): string {
@@ -103,7 +107,7 @@ function jobRow<N>(el: Elements<N>, jobs: JobView[], j: JobView, opts: PaneOpts)
   const { Box, Text, Button } = el
   const t = (s: string) => redact(s, opts.secrets)
   const id = uiId(jobs, j.ref)
-  const meta = [`${j.ref.forge}:${j.ref.project}`, age(j.sinceMs)]
+  const meta = [entryLabel(j.ref, opts.gitlabHost || 'gitlab.com'), age(j.sinceMs)]
   if (j.fixLoops > 0) meta.push(`fix loops ${j.fixLoops}`)
   if (j.needsHuman) meta.push('needs you')
   const decide = j.station === 'awaiting-spec' && j.needsHuman
@@ -161,7 +165,7 @@ export function specReviewTree<N>(el: Elements<N>, job: JobView, specMarkdown: s
             submitLabel: 'send back',
             onSubmit: (value: string) => opts.actions.revise(job.ref, value),
           })
-        : Text({ dimColor: true, children: t(`To send it back with notes: /factory revise ${job.ref.forge}:${job.ref.project}#${job.ref.issue} <notes>`) }),
+        : Text({ dimColor: true, children: t(`To send it back with notes: /factory revise ${refLabel(job.ref, opts.gitlabHost || 'gitlab.com')} <notes>`) }),
       opts.message ? Text({ children: t(opts.message) }) : null,
     ],
   })

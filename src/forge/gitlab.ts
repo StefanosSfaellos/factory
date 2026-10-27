@@ -1,18 +1,40 @@
 import { STATIONS } from '../types'
 import type { Comment, Job, JobRef, Station } from '../types'
+import { hostOf } from '../hosts'
 import { ForgeError } from './types'
 import type { Forge, HttpFn } from './types'
 
 const LABEL_PREFIX = 'factory::'
 const ALL_FACTORY_LABELS = [...STATIONS.map((s) => LABEL_PREFIX + s), LABEL_PREFIX + 'spec-approved']
+/** The labels a wildcard listing queries, one at a time: every station but done. */
+const ACTIVE_LABELS = STATIONS.filter((s) => s !== 'done').map((s) => LABEL_PREFIX + s)
 
 export function gitlabForge(http: HttpFn, opts: { baseUrl: string; token: string }): Forge {
   const root = opts.baseUrl.replace(/\/+$/, '')
   const api = root + '/api/v4'
   const host = root.replace(/^https?:\/\//, '')
+  /** The instance's lower-case host name: every JobRef it makes carries it. */
+  const hostName = hostOf(root)
+  /**
+   * The projects where the token's user is a member with Developer (30) access or more,
+   * id -> path_with_namespace. Read once per forge instance (hooks/register.ts builds the
+   * forges afresh for every tick); a failed read is not kept, so the next tick asks again.
+   */
+  let members: Promise<Map<number, string>> | undefined
+  const memberProjects = (): Promise<Map<number, string>> => {
+    members ??= paged('/projects?membership=true&min_access_level=30&simple=true')
+      .then((ps) => new Map(ps.map((p: any) => [Number(p.id), String(p.path_with_namespace ?? '')] as [number, string])))
+      .catch((e) => {
+        members = undefined
+        throw new ForgeError(e instanceof ForgeError ? e.status : 0, `GitLab membership check failed, wildcard skipped: ${e instanceof Error ? e.message : String(e)}`)
+      })
+    return members
+  }
 
   async function call(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<any> {
-    const headers: Record<string, string> = { 'PRIVATE-TOKEN': opts.token, Accept: 'application/json' }
+    // Authorization, not PRIVATE-TOKEN: fetch drops Authorization on a cross-origin
+    // redirect, but would carry a custom header to the other origin.
+    const headers: Record<string, string> = { Authorization: `Bearer ${opts.token}`, Accept: 'application/json' }
     const req: { url: string; method: 'GET' | 'POST' | 'PUT'; headers: Record<string, string>; body?: string } = {
       url: api + path,
       method,
@@ -63,7 +85,36 @@ export function gitlabForge(http: HttpFn, opts: { baseUrl: string; token: string
       for (const i of issues) {
         const labels: string[] = i.labels ?? []
         const active = labels.some((l) => l.startsWith(LABEL_PREFIX) && l !== LABEL_PREFIX + 'done')
-        if (active) refs.push({ forge: 'gitlab', project, issue: i.iid })
+        if (active) refs.push({ forge: 'gitlab', host: hostName, project, issue: i.iid })
+      }
+      return refs
+    },
+
+    async listJobsIn(scope) {
+      const base = scope.kind === 'all'
+        ? '/issues?scope=all&state=opened'
+        : `/groups/${encodeURIComponent(scope.path)}/issues?state=opened&include_subgroups=true`
+      // Fail closed: without the member list a wildcard yields nothing (the error reaches tick/status).
+      // Only issues of projects where the user has Developer access or more count; public
+      // projects of others on the same instance are left alone.
+      const mine = await memberProjects()
+      const pathOf = (i: any): string => {
+        const id = Number(i.project_id)
+        if (!mine.has(id)) return ''
+        const full = i.references?.full
+        if (typeof full === 'string' && full.includes('#')) return full.replace(/#\d+$/, '')
+        return mine.get(id)!
+      }
+      const seen = new Set<string>()
+      const refs: JobRef[] = []
+      for (const label of ACTIVE_LABELS) {
+        for (const i of await paged(`${base}&labels=${encodeURIComponent(label)}`)) {
+          const project = pathOf(i)
+          const key = `${project}#${i.iid}`
+          if (project === '' || seen.has(key)) continue
+          seen.add(key)
+          refs.push({ forge: 'gitlab', host: hostName, project, issue: i.iid })
+        }
       }
       return refs
     },
@@ -100,7 +151,7 @@ export function gitlabForge(http: HttpFn, opts: { baseUrl: string; token: string
 
     async createIssue(project, title, body) {
       const i = await call('POST', `/projects/${pid(project)}/issues`, { title, description: body })
-      return { forge: 'gitlab', project, issue: i.iid }
+      return { forge: 'gitlab', host: hostName, project, issue: i.iid }
     },
 
     async openMR(ref, branch, title, body) {
@@ -141,7 +192,7 @@ export function gitlabForge(http: HttpFn, opts: { baseUrl: string; token: string
 
     async readFile(project, path, ref) {
       const p = `/projects/${pid(project)}/repository/files/${encodeURIComponent(path)}/raw?ref=${encodeURIComponent(ref)}`
-      const res = await http({ url: api + p, method: 'GET', headers: { 'PRIVATE-TOKEN': opts.token } })
+      const res = await http({ url: api + p, method: 'GET', headers: { Authorization: `Bearer ${opts.token}` } })
       if (res.status === 404) return null
       if (res.status < 200 || res.status >= 300) throw new ForgeError(res.status, `GitLab GET ${p} failed: ${res.status}`)
       return res.text

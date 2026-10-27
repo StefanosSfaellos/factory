@@ -5,7 +5,8 @@ import { specDecision, stationOf } from './machine'
 import { parseMarker } from './markers'
 import { redact } from './redact'
 import { advance, type Deps } from './stations'
-import type { Comment, Job, JobRef, Station } from './types'
+import { jobKey, sameRef } from './hosts'
+import type { Comment, Job, JobRef, Project, Station } from './types'
 
 // The tick: one pass over the configured projects of one forge. It lists the
 // open factory jobs, skips the ones that wait on a human, takes a lease on up
@@ -13,7 +14,7 @@ import type { Comment, Job, JobRef, Station } from './types'
 // until it needs a human, ends, blocks or stops moving. Everything here is a
 // chain of awaited forge/agent calls; nothing waits on time.
 
-export type Project = { forge: 'github' | 'gitlab'; project: string }
+export type { Project } from './types'
 export type Advanced = { ref: JobRef; from: Station; to: Station; needsHuman: boolean }
 export type Skipped = { ref: JobRef; reason: string }
 export type TickResult = { advanced: Advanced[]; skipped: Skipped[] }
@@ -31,7 +32,11 @@ const MAX_STEPS = 30
 const IDLE: Station[] = ['done', 'mr-open', 'blocked']
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
-const sameRef = (a: JobRef, b: JobRef) => a.forge === b.forge && a.project === b.project && a.issue === b.issue
+
+/** The open factory jobs of one repos entry: one project, or a wildcard's listing. */
+export function listEntry(forge: Forge, p: Project): Promise<JobRef[]> {
+  return p.scope ? forge.listJobsIn(p.scope) : forge.listJobs(p.project)
+}
 
 /** Drops factory marker comments not written by the factory's own account (forged state). */
 export function ownMarkersOnly(comments: Comment[], me: string): Comment[] {
@@ -82,18 +87,24 @@ export async function tick(deps: TickDeps): Promise<TickResult> {
     return { job, d: decideLease(job.comments, deps.workerId, deps.now()) }
   }
 
-  // 1. Candidates: open jobs that are not waiting on a human.
+  // 1. Candidates: open jobs that are not waiting on a human. A job matched by
+  // several entries (an exact one and a wildcard) is a candidate once.
   const candidates: JobRef[] = []
+  const seen = new Set<string>()
   for (const p of deps.projects) {
     let refs: JobRef[]
     try {
-      refs = await forge.listJobs(p.project)
+      refs = await listEntry(forge, p)
     } catch (e) {
-      skipped.push({ ref: { forge: p.forge, project: p.project, issue: 0 }, reason: clean(`list failed: ${errText(e)}`) })
+      skipped.push({ ref: { forge: p.forge, host: p.host, project: p.project, issue: 0 }, reason: clean(`list failed: ${errText(e)}`) })
       continue
     }
     if (deps.only) refs = refs.filter((r) => deps.only!.some((o) => sameRef(o, r)))
-    candidates.push(...refs)
+    for (const r of refs) {
+      if (seen.has(jobKey(r))) continue
+      seen.add(jobKey(r))
+      candidates.push(r)
+    }
   }
 
   // 2. Leases, one job at a time, until `parallel` jobs are held.

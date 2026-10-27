@@ -1,6 +1,7 @@
 import { parseMarker } from './markers'
 import { redact } from './redact'
 import type { Advanced } from './tick'
+import { jobKey, refLabel } from './hosts'
 import type { Job, JobRef } from './types'
 
 export type SlackKind = 'needs-spec-review' | 'mr-opened' | 'blocked'
@@ -19,8 +20,8 @@ const MAX_DETAIL = 500
 export const escapeSlack = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
 /** The JSON body for a Slack incoming webhook: `{ text }`, redacted. */
-export function slackPayload(ev: SlackEvent, secrets: string[] = []): string {
-  const where = escapeSlack(`${ev.ref.forge}:${ev.ref.project}#${ev.ref.issue}`)
+export function slackPayload(ev: SlackEvent, secrets: string[] = [], gitlabHost = 'gitlab.com'): string {
+  const where = escapeSlack(refLabel(ev.ref, gitlabHost))
   const lines = [`*${HEAD[ev.kind]}*: ${escapeSlack(ev.title)} (${where})`, escapeSlack(ev.url)]
   if (ev.detail) lines.push(escapeSlack(redact(ev.detail, secrets).slice(0, MAX_DETAIL)))
   return JSON.stringify({ text: redact(lines.join('\n'), secrets) })
@@ -38,7 +39,7 @@ export async function slackEvents(advanced: Advanced[], info: (ref: JobRef) => P
   for (const a of advanced) {
     const kind = KIND[a.to]
     if (!kind) continue
-    const key = `${a.ref.forge}:${a.ref.project}#${a.ref.issue}#${a.to}`
+    const key = `${jobKey(a.ref)}#${a.to}`
     if (seen.has(key)) continue
     seen.add(key)
     try {

@@ -8,7 +8,7 @@
     "repos": {
       "type": "string",
       "title": "Repositories",
-      "description": "Comma-separated list of repos to work, e.g. github:owner/name,gitlab:group/name",
+      "description": "Comma-separated repos: github:owner/name, github:owner/*, github:*, gitlab:group/name, gitlab:group/*, gitlab:*, or with a GitLab host first: gitlab:lab.example.gr/group/name, gitlab:lab.example.gr/group/*, gitlab:lab.example.gr/*. Tokens: GITHUB_TOKEN, GITLAB_TOKEN+GITLAB_URL, FACTORY_TOKENS=host=token,host=token",
       "default": ""
     },
     "workerId": {

@@ -2,8 +2,9 @@ import type { Forge } from './forge/types'
 import { fixLoopsOf, specDecision, stationOf } from './machine'
 import { redact } from './redact'
 import type { Deps } from './stations'
-import { ownMarkersOnly, tick, type Project, type TickResult } from './tick'
-import type { JobRef, Station } from './types'
+import { DEFAULT_GITLAB_URL, entryLabel, hostOf, jobKey, parsePath, parseRepoList, refLabel } from './hosts'
+import { listEntry, ownMarkersOnly, tick, type Project, type TickResult } from './tick'
+import type { ForgeKind, JobRef, Station } from './types'
 
 // `/factory` subcommands: parsing, issue-ref resolution and the handlers.
 // Pure: the forges and the station deps come in from hooks/register.ts.
@@ -28,13 +29,14 @@ export const HELP = [
   '  /factory status [issue]             text summary of the jobs',
   '  /factory pause | resume             stop or start the session ticker',
   '  /factory                            open the pipeline pane (interactive sessions)',
-  'Issues: #42 (when exactly one repo is configured) or gitlab:group/name#42 / github:owner/name#42.',
+  'Issues: #42 (when exactly one repo, not a wildcard, is configured) or a full reference:',
+  '  github:owner/name#42, gitlab:group/name#42 (the GITLAB_URL host), gitlab:<host>/group/name#42.',
 ].join('\n')
 
 const ISSUE = /^(?:(github|gitlab):([^\s#]+))?#(\d+)$/
 
 const SHORT_REF_HELP = (n: string) =>
-  `use a full issue reference: gitlab:group/name#${n} or github:owner/name#${n}`
+  `use a full issue reference: gitlab:group/name#${n}, gitlab:<host>/group/name#${n} or github:owner/name#${n}`
 
 export function parseCommand(args: string): Command {
   const text = args.trim()
@@ -81,28 +83,38 @@ export function parseCommand(args: string): Command {
   }
 }
 
-export function parseRepos(list: string): { projects: Project[]; errors: string[] } {
-  const projects: Project[] = []
-  const errors: string[] = []
-  for (const raw of list.split(',').map((s) => s.trim()).filter(Boolean)) {
-    const m = /^(github|gitlab):([^\s#:]+\/[^\s#:]+)$/.exec(raw)
-    if (m) projects.push({ forge: m[1] as Project['forge'], project: m[2] })
-    else errors.push(`bad repo "${raw}" (use github:owner/name or gitlab:group/name)`)
-  }
-  return { projects, errors }
+const DEFAULT_GITLAB_HOST = hostOf(DEFAULT_GITLAB_URL)
+
+/**
+ * Reads the plugin option `repos`. Entry forms: `github:owner/name`, `github:owner/*`,
+ * `github:*`, `gitlab:group/name`, `gitlab:group/*`, `gitlab:*`, and the GitLab forms with
+ * a host first (`gitlab:<host>/group/name`). A first segment with a dot is a host; GitLab
+ * entries without one are on `gitlabHost` (GITLAB_URL's host).
+ */
+export function parseRepos(list: string, opts: { gitlabHost?: string; knownHosts?: string[] } = {}): { projects: Project[]; errors: string[] } {
+  return parseRepoList(list, opts.gitlabHost || DEFAULT_GITLAB_HOST, opts.knownHosts ?? [])
 }
 
-export function resolveIssue(s: string, projects: Project[]): { ref: JobRef } | { error: string } {
+/**
+ * A full reference (`github:owner/name#42`, `gitlab:group/name#42`, `gitlab:<host>/group/name#42`),
+ * or `#42` when exactly one repo is configured and it is not a wildcard.
+ */
+export function resolveIssue(s: string, projects: Project[], gitlabHost: string = DEFAULT_GITLAB_HOST, knownHosts: string[] = []): { ref: JobRef } | { error: string } {
   const m = ISSUE.exec(s.trim())
   if (!m) return { error: `bad issue reference "${s}" (use #42, gitlab:group/name#42 or github:owner/name#42)` }
   const issue = Number(m[3])
   if (!Number.isSafeInteger(issue) || issue < 1) return { error: `bad issue number in "${s}"` }
   if (m[1]) {
-    if (!/^[^/]+(\/[^/]+)+$/.test(m[2])) return { error: `bad project in "${s}" (use group/name)` }
-    return { ref: { forge: m[1] as JobRef['forge'], project: m[2], issue } }
+    const forge = m[1] as ForgeKind
+    const r = parsePath(forge, m[2], gitlabHost, false, knownHosts)
+    if ('error' in r) return { error: `bad project in "${s}" (${r.error})` }
+    return { ref: { forge, host: r.host, project: r.project, issue } }
   }
-  if (projects.length === 1) return { ref: { forge: projects[0].forge, project: projects[0].project, issue } }
-  const why = projects.length === 0 ? 'no repos are configured' : `${projects.length} repos are configured`
+  const p = projects[0]
+  if (projects.length === 1 && !p.scope) return { ref: { forge: p.forge, host: p.host, project: p.project, issue } }
+  const why = projects.length === 0 ? 'no repos are configured'
+    : projects.some((x) => x.scope) ? 'a wildcard repo is configured'
+    : `${projects.length} repos are configured`
   return { error: `#${issue} is ambiguous: ${why}; ${SHORT_REF_HELP(String(issue))}` }
 }
 
@@ -111,9 +123,14 @@ export function resolveIssue(s: string, projects: Project[]): { ref: JobRef } | 
 
 export type Env = {
   projects: Project[]
+  /** Bad `repos` entries and bad FACTORY_TOKENS entries. */
   repoErrors: string[]
-  /** The forge client for a forge kind, or the reason there is none (e.g. a missing token). */
-  forgeFor: (kind: Project['forge']) => { forge: Forge } | { error: string }
+  /** GITLAB_URL's host: what a GitLab entry or reference without a host means. Default gitlab.com. */
+  gitlabHost?: string
+  /** First path segments that name a GitLab host without a dot (a dotless GITLAB_URL host, its host:port). */
+  knownHosts?: string[]
+  /** The forge client for a (kind, host), or the reason there is none (e.g. a missing token). */
+  forgeFor: (at: { forge: ForgeKind; host: string }) => { forge: Forge } | { error: string }
   /** Station deps (everything but the forge), for tick and run. */
   deps: Omit<Deps, 'forge' | 'loadConfig'>
   /** Builds Deps.loadConfig for a forge. */
@@ -137,36 +154,37 @@ export type Env = {
 /** What `/factory` alone answers where no pane can open (a `-p` run, an SDK host). */
 export const OPEN_HEADLESS = 'factory: the pane needs an interactive session; use /factory status for a summary (/factory help lists every command)'
 
-const label = (r: JobRef) => `${r.forge}:${r.project}#${r.issue}`
+const glHost = (env: { gitlabHost?: string }) => env.gitlabHost || DEFAULT_GITLAB_HOST
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
 function noRepos(env: Env): string {
-  const lines = ['no repos configured. Set the plugin option "repos" (e.g. gitlab:group/name,github:owner/name) in /config.']
+  const lines = ['no repos configured. Set the plugin option "repos" (e.g. gitlab:group/name,github:owner/*) in /config.']
   if (env.repoErrors.length) lines.push(...env.repoErrors)
   return lines.join('\n')
 }
 
-export function summarizeTick(r: TickResult): string {
+export function summarizeTick(r: TickResult, gitlabHost: string = DEFAULT_GITLAB_HOST, knownHosts: string[] = []): string {
+  const label = (ref: JobRef) => refLabel(ref, gitlabHost, knownHosts)
   const lines: string[] = []
   for (const a of r.advanced) lines.push(`${label(a.ref)}: ${a.from} -> ${a.to}${a.needsHuman ? ' (needs you)' : ''}`)
-  for (const s of r.skipped) lines.push(`${s.ref.issue === 0 ? `${s.ref.forge}:${s.ref.project}` : label(s.ref)}: skipped (${s.reason})`)
-  const jobs = new Set(r.advanced.map((a) => label(a.ref))).size
+  for (const s of r.skipped) lines.push(`${s.ref.issue === 0 ? entryLabel(s.ref, gitlabHost, knownHosts) : label(s.ref)}: skipped (${s.reason})`)
+  const jobs = new Set(r.advanced.map((a) => jobKey(a.ref))).size
   return [`factory tick: advanced ${jobs} job${jobs === 1 ? '' : 's'} (${r.advanced.length} step${r.advanced.length === 1 ? '' : 's'}), skipped ${r.skipped.length}`, ...lines].join('\n')
 }
 
-/** Runs one tick per forge kind over the configured projects (or just `only`). */
+/** Runs one tick per forge instance (kind and host) over the configured entries (or just `only`). */
 async function runTick(env: Env, only?: JobRef): Promise<string> {
-  const kinds = [...new Set(env.projects.map((p) => p.forge))]
-  if (only && !kinds.includes(only.forge)) kinds.push(only.forge)
+  const groups = new Map<string, Project[]>()
+  const entries: Project[] = only ? [{ forge: only.forge, host: only.host, project: only.project }] : env.projects
+  for (const p of entries) {
+    const k = `${p.forge}|${p.host}`
+    groups.set(k, [...(groups.get(k) ?? []), p])
+  }
   const out: TickResult = { advanced: [], skipped: [] }
-  for (const kind of kinds) {
-    const f = env.forgeFor(kind)
-    const projects = only
-      ? (only.forge === kind ? [{ forge: kind, project: only.project }] : [])
-      : env.projects.filter((p) => p.forge === kind)
-    if (projects.length === 0) continue
+  for (const projects of groups.values()) {
+    const f = env.forgeFor(projects[0])
     if ('error' in f) {
-      for (const p of projects) out.skipped.push({ ref: { ...p, issue: only?.issue ?? 0 }, reason: f.error })
+      for (const p of projects) out.skipped.push({ ref: { forge: p.forge, host: p.host, project: p.project, issue: only?.issue ?? 0 }, reason: f.error })
       continue
     }
     const r = await tick({
@@ -179,7 +197,7 @@ async function runTick(env: Env, only?: JobRef): Promise<string> {
   if (env.onTick) {
     try { await env.onTick(out) } catch { /* the UI is best-effort */ }
   }
-  return summarizeTick(out)
+  return summarizeTick(out, glHost(env), env.knownHosts ?? [])
 }
 
 const BUSY = 'a tick is already running; try again when it ends'
@@ -196,10 +214,13 @@ async function exclusive(env: Env, fn: () => Promise<string>): Promise<string> {
 }
 
 async function status(env: Env, issue?: string): Promise<string> {
+  const gl = glHost(env)
+  const kh = env.knownHosts ?? []
+  const label = (r: JobRef) => refLabel(r, gl, kh)
   if (issue) {
-    const r = resolveIssue(issue, env.projects)
+    const r = resolveIssue(issue, env.projects, gl, kh)
     if ('error' in r) return r.error
-    const f = env.forgeFor(r.ref.forge)
+    const f = env.forgeFor(r.ref)
     if ('error' in f) return f.error
     // R6: only the factory's own markers count; forged ones are ignored.
     const raw = await f.forge.getJob(r.ref)
@@ -212,13 +233,17 @@ async function status(env: Env, issue?: string): Promise<string> {
   if (env.projects.length === 0) return noRepos(env)
   const lines: string[] = []
   let total = 0
+  // A job matched by several entries (an exact one and a wildcard) is counted once, under the first.
+  const seen = new Set<string>()
   for (const p of env.projects) {
-    const f = env.forgeFor(p.forge)
-    if ('error' in f) { lines.push(`${p.forge}:${p.project}: ${f.error}`); continue }
+    const name = entryLabel(p, gl, kh)
+    const f = env.forgeFor(p)
+    if ('error' in f) { lines.push(`${name}: ${f.error}`); continue }
     try {
-      const refs = await f.forge.listJobs(p.project)
+      const refs = (await listEntry(f.forge, p)).filter((r) => !seen.has(jobKey(r)))
+      for (const r of refs) seen.add(jobKey(r))
       total += refs.length
-      const byStation = new Map<string, number[]>()
+      const byStation = new Map<string, string[]>()
       const me = refs.length > 0 ? await f.forge.whoami() : ''
       for (const ref of refs) {
         const raw = await f.forge.getJob(ref)
@@ -226,12 +251,13 @@ async function status(env: Env, issue?: string): Promise<string> {
         const st = stationOf(job)
         let key = 'invalid' in st ? 'invalid' : st.station
         if (key === 'awaiting-spec' && 'none' in specDecision(job)) key = 'awaiting-spec (needs you)'
-        byStation.set(key, [...(byStation.get(key) ?? []), ref.issue])
+        // A wildcard's jobs span projects: each is shown with its project.
+        byStation.set(key, [...(byStation.get(key) ?? []), p.scope ? `${ref.project}#${ref.issue}` : `#${ref.issue}`])
       }
-      const parts = [...byStation].map(([s, ns]) => `${s}: ${ns.map((n) => `#${n}`).join(' ')}`)
-      lines.push(`${p.forge}:${p.project}: ${refs.length} job${refs.length === 1 ? '' : 's'}${parts.length ? ` — ${parts.join('; ')}` : ''}`)
+      const parts = [...byStation].map(([s, ns]) => `${s}: ${ns.join(' ')}`)
+      lines.push(`${name}: ${refs.length} job${refs.length === 1 ? '' : 's'}${parts.length ? ` — ${parts.join('; ')}` : ''}`)
     } catch (e) {
-      lines.push(`${p.forge}:${p.project}: error: ${errText(e)}`)
+      lines.push(`${name}: error: ${errText(e)}`)
     }
   }
   const head = `${total} job${total === 1 ? '' : 's'} in ${env.projects.length} repo${env.projects.length === 1 ? '' : 's'} (worker ${env.deps.workerId}${env.isPaused() ? ', ticker paused' : ''})`
@@ -246,10 +272,11 @@ export async function decideSpec(env: Env, cmd: { kind: 'approve'; issue: string
   const body = cmd.kind === 'approve' ? '/approve' : `/revise ${cmd.notes}`
   const verb = cmd.kind === 'approve' ? 'approved' : 'sent back for revision'
   const secrets = env.deps.secrets
+  const label = (r: JobRef) => refLabel(r, glHost(env), env.knownHosts ?? [])
   try {
-    const r = resolveIssue(cmd.issue, env.projects)
+    const r = resolveIssue(cmd.issue, env.projects, glHost(env), env.knownHosts ?? [])
     if ('error' in r) return { posted: false, text: redact(r.error, secrets) }
-    const f = env.forgeFor(r.ref.forge)
+    const f = env.forgeFor(r.ref)
     if ('error' in f) return { posted: false, text: redact(f.error, secrets) }
     const job = await f.forge.getJob(r.ref)
     const st = stationOf(job)
@@ -292,16 +319,18 @@ async function dispatch(cmd: Command, env: Env): Promise<string> {
         return env.projects.length === 0 ? noRepos(env) : '/factory new needs exactly one configured repo; several are configured'
       }
       const p = env.projects[0]
-      const f = env.forgeFor(p.forge)
+      if (p.scope) return `/factory new needs one exact repo; ${entryLabel(p, glHost(env), env.knownHosts ?? [])} is a wildcard`
+      const f = env.forgeFor(p)
       if ('error' in f) return f.error
       const ref = await f.forge.createIssue(p.project, cmd.title, cmd.body)
       await f.forge.setStation(ref, 'ready')
-      return `created ${label(ref)} "${cmd.title}" at factory::ready`
+      return `created ${refLabel(ref, glHost(env), env.knownHosts ?? [])} "${cmd.title}" at factory::ready`
     }
     case 'run': {
-      const r = resolveIssue(cmd.issue!, env.projects)
+      const label = (r: JobRef) => refLabel(r, glHost(env), env.knownHosts ?? [])
+      const r = resolveIssue(cmd.issue!, env.projects, glHost(env), env.knownHosts ?? [])
       if ('error' in r) return r.error
-      const f = env.forgeFor(r.ref.forge)
+      const f = env.forgeFor(r.ref)
       if ('error' in f) return f.error
       if (env.workError) return env.workError
       const forge = f.forge

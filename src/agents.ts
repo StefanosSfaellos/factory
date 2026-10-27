@@ -47,6 +47,7 @@ export function childSettings(cfg: RepoConfig): string {
       envVars: [
         { name: 'GITHUB_TOKEN', mode: 'deny' },
         { name: 'GITLAB_TOKEN', mode: 'deny' },
+        { name: 'FACTORY_TOKENS', mode: 'deny' },
       ],
     },
   }

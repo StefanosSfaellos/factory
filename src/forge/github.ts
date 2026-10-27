@@ -6,6 +6,9 @@ import type { Forge, HttpFn } from './types'
 const LABEL_PREFIX = 'factory::'
 const ALL_FACTORY_LABELS = [...STATIONS.map((s) => LABEL_PREFIX + s), LABEL_PREFIX + 'spec-approved']
 const TRUSTED = ['OWNER', 'MEMBER', 'COLLABORATOR']
+/** The labels a wildcard listing queries, one at a time (GitHub ANDs several): every station but done. */
+const ACTIVE_LABELS = STATIONS.filter((s) => s !== 'done').map((s) => LABEL_PREFIX + s)
+const HOST = 'github.com'
 
 type Method = 'GET' | 'POST' | 'PUT' | 'PATCH'
 
@@ -76,7 +79,26 @@ export function githubForge(http: HttpFn, opts: { token: string; apiUrl?: string
       for (const i of issues) {
         if (i.pull_request) continue
         const active = labelNames(i.labels).some((l) => l.startsWith(LABEL_PREFIX) && l !== LABEL_PREFIX + 'done')
-        if (active) refs.push({ forge: 'github', project, issue: i.number })
+        if (active) refs.push({ forge: 'github', host: HOST, project, issue: i.number })
+      }
+      return refs
+    },
+
+    async listJobsIn(scope) {
+      const owner = scope.kind === 'group' ? scope.path.toLowerCase() : undefined
+      const seen = new Set<string>()
+      const refs: JobRef[] = []
+      for (const label of ACTIVE_LABELS) {
+        for (const i of await paged(`/issues?filter=all&state=open&labels=${encodeURIComponent(label)}`)) {
+          if (i.pull_request) continue
+          const project = i.repository?.full_name
+          if (typeof project !== 'string' || !project.includes('/')) continue
+          if (owner !== undefined && project.split('/')[0].toLowerCase() !== owner) continue
+          const key = `${project.toLowerCase()}#${i.number}`
+          if (seen.has(key)) continue
+          seen.add(key)
+          refs.push({ forge: 'github', host: HOST, project, issue: i.number })
+        }
       }
       return refs
     },
@@ -112,7 +134,7 @@ export function githubForge(http: HttpFn, opts: { token: string; apiUrl?: string
 
     async createIssue(project, title, body) {
       const i = await call('POST', `${repo(project)}/issues`, { title, body })
-      return { forge: 'github', project, issue: i.number }
+      return { forge: 'github', host: HOST, project, issue: i.number }
     },
 
     async openMR(ref, branch, title, body) {
