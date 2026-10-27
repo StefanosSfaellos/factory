@@ -1,4 +1,4 @@
-import type { Comment, Job, JobRef, Station } from '../types'
+import type { Comment, Job, JobRef, ListScope, Station } from '../types'
 
 export type HttpFn = (req: {
   url: string
@@ -9,6 +9,8 @@ export type HttpFn = (req: {
 
 export interface Forge {
   listJobs(project: string): Promise<JobRef[]>
+  /** Open factory jobs across every project the token sees, or one group/owner (a wildcard repo entry). */
+  listJobsIn(scope: ListScope): Promise<JobRef[]>
   getJob(ref: JobRef): Promise<Job>
   comment(ref: JobRef, body: string): Promise<Comment>
   editComment(ref: JobRef, id: string, body: string): Promise<void>

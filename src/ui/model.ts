@@ -2,8 +2,11 @@ import type { Forge } from '../forge/types'
 import { fixLoopsOf, specDecision, stationOf } from '../machine'
 import { parseMarker } from '../markers'
 import { redact } from '../redact'
-import { ownMarkersOnly, type Advanced, type Project } from '../tick'
-import type { Comment, Job, JobRef, Station } from '../types'
+import { entryLabel, jobKey, sameRef } from '../hosts'
+import { listEntry, ownMarkersOnly, type Advanced, type Project } from '../tick'
+import type { Comment, ForgeKind, Job, JobRef, Station } from '../types'
+
+export { jobKey, sameRef }
 
 // What the session UI shows of a job, and the plain functions that build it.
 // Pure: forges come in as values, nothing here touches `$`.
@@ -25,9 +28,6 @@ const WORKING: Station[] = ['spec', 'design', 'plan', 'build', 'verify', 'review
 /** A station where an agent or the mod does work (not a queue, a wait on a person, or an end). */
 export const isWorking = (s: Station) => WORKING.includes(s)
 
-/** `<forge>:<project>#<issue>`: a job's identity in the UI, and its full issue reference. */
-export const jobKey = (r: JobRef) => `${r.forge}:${r.project}#${r.issue}`
-export const sameRef = (a: JobRef, b: JobRef) => a.forge === b.forge && a.project === b.project && a.issue === b.issue
 
 const at = (c: Comment) => Date.parse(c.createdAt)
 const COMMAND = /^\/(approve|revise|retry)(\s|$)/
@@ -153,28 +153,34 @@ export function spinnerSuffix(r: { issue: number; station: Station } | null): st
   return r ? ` · factory #${r.issue} ${r.station}` : ''
 }
 
-/** Reads every configured project's jobs from its forge; a project that fails is reported, not thrown. */
+/**
+ * Reads every configured entry's jobs from its forge (by kind and host); an entry that
+ * fails is reported, not thrown. A job matched by several entries is shown once.
+ */
 export async function loadViews(
   projects: Project[],
-  forgeFor: (kind: Project['forge']) => { forge: Forge } | { error: string },
-  opts: { now: number; secrets: string[] },
+  forgeFor: (at: { forge: ForgeKind; host: string }) => { forge: Forge } | { error: string },
+  opts: { now: number; secrets: string[]; gitlabHost?: string },
 ): Promise<{ views: JobView[]; errors: string[] }> {
   const views: JobView[] = []
   const errors: string[] = []
+  const seen = new Set<string>()
   const clean = (t: string) => redact(t, opts.secrets)
+  const name = (p: Project) => entryLabel(p, opts.gitlabHost || 'gitlab.com')
   for (const p of projects) {
-    const f = forgeFor(p.forge)
-    if ('error' in f) { errors.push(clean(`${p.forge}:${p.project}: ${f.error}`)); continue }
+    const f = forgeFor(p)
+    if ('error' in f) { errors.push(clean(`${name(p)}: ${f.error}`)); continue }
     try {
       const me = await f.forge.whoami()
-      const url = f.forge.publicUrl(p.project)
-      for (const ref of await f.forge.listJobs(p.project)) {
+      for (const ref of await listEntry(f.forge, p)) {
+        if (seen.has(jobKey(ref))) continue
+        seen.add(jobKey(ref))
         const raw = await f.forge.getJob(ref)
         const job = { ...raw, comments: ownMarkersOnly(raw.comments, me) }
-        views.push(toView(job, { now: opts.now, secrets: opts.secrets, issueUrl: (r) => issueUrl(url, r) }))
+        views.push(toView(job, { now: opts.now, secrets: opts.secrets, issueUrl: (r) => issueUrl(f.forge.publicUrl(r.project), r) }))
       }
     } catch (e) {
-      errors.push(clean(`${p.forge}:${p.project}: ${e instanceof Error ? e.message : String(e)}`))
+      errors.push(clean(`${name(p)}: ${e instanceof Error ? e.message : String(e)}`))
     }
   }
   return { views, errors }

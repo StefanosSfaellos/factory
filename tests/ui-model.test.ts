@@ -6,7 +6,7 @@ import type { Comment, Job, JobRef, Station } from '../src/types'
 const T0 = Date.UTC(2026, 9, 21, 12)
 const MIN = 60000
 const iso = (ms: number) => new Date(ms).toISOString()
-const ref = (issue: number): JobRef => ({ forge: 'gitlab', project: 'g/p', issue })
+const ref = (issue: number): JobRef => ({ forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue })
 
 function view(issue: number, station: Station, needsHuman = false): JobView {
   return { ref: ref(issue), title: `Job ${issue}`, station, sinceMs: 0, fixLoops: 0, needsHuman, links: { issue: `https://gitlab.com/g/p/-/issues/${issue}` } }
@@ -65,8 +65,8 @@ test('toView redacts secrets out of the title', () => {
 })
 
 test('issueUrl builds the web URL from the tokenless clone URL', () => {
-  expect(issueUrl('https://gitlab.example.com/g/sub/p.git', { forge: 'gitlab', project: 'g/sub/p', issue: 4 })).toBe('https://gitlab.example.com/g/sub/p/-/issues/4')
-  expect(issueUrl('https://github.com/o/r.git', { forge: 'github', project: 'o/r', issue: 4 })).toBe('https://github.com/o/r/issues/4')
+  expect(issueUrl('https://gitlab.example.com/g/sub/p.git', { forge: 'gitlab', host: 'gitlab.com', project: 'g/sub/p', issue: 4 })).toBe('https://gitlab.example.com/g/sub/p/-/issues/4')
+  expect(issueUrl('https://github.com/o/r.git', { forge: 'github', host: 'github.com', project: 'o/r', issue: 4 })).toBe('https://github.com/o/r/issues/4')
 })
 
 test('latestSpec and dossierMarkdown read the factory marker comments', () => {
@@ -119,8 +119,8 @@ test('loadViews reads every configured project and reports forge errors per proj
     publicUrl: (p: string) => `https://gitlab.com/${p}.git`,
   } as unknown as Forge
   const r = await loadViews(
-    [{ forge: 'gitlab', project: 'g/p' }, { forge: 'github', project: 'o/r' }],
-    (kind) => (kind === 'gitlab' ? { forge } : { error: 'GITHUB_TOKEN is not set' }),
+    [{ forge: 'gitlab', host: 'gitlab.com', project: 'g/p' }, { forge: 'github', host: 'github.com', project: 'o/r' }],
+    (at) => (at.forge === 'gitlab' ? { forge } : { error: 'GITHUB_TOKEN is not set' }),
     { now: T0 + 5 * MIN, secrets: [] },
   )
   expect(r.views.map((v) => [v.ref.issue, v.station, v.needsHuman])).toEqual([[1, 'build', false], [2, 'awaiting-spec', true]])

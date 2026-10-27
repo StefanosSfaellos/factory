@@ -32,25 +32,25 @@ test('parseCommand rejects malformed input', () => {
 test('parseRepos reads forge:project lists and reports bad entries', () => {
   expect(parseRepos('')).toEqual({ projects: [], errors: [] })
   expect(parseRepos(' github:o/r , gitlab:g/sub/p ')).toEqual({
-    projects: [{ forge: 'github', project: 'o/r' }, { forge: 'gitlab', project: 'g/sub/p' }], errors: [],
+    projects: [{ forge: 'github', host: 'github.com', project: 'o/r' }, { forge: 'gitlab', host: 'gitlab.com', project: 'g/sub/p' }], errors: [],
   })
   expect(parseRepos('bitbucket:x/y,o/r').errors).toEqual([
-    'bad repo "bitbucket:x/y" (use github:owner/name or gitlab:group/name)',
-    'bad repo "o/r" (use github:owner/name or gitlab:group/name)',
+    'bad repo "bitbucket:x/y" (use github:owner/name, github:owner/*, gitlab:group/name, gitlab:<host>/group/name or gitlab:<host>/group/*)',
+    'bad repo "o/r" (use github:owner/name, github:owner/*, gitlab:group/name, gitlab:<host>/group/name or gitlab:<host>/group/*)',
   ])
 })
 
 test('resolveIssue: #N needs exactly one configured repo; full refs always work', () => {
-  const one = [{ forge: 'gitlab' as const, project: 'g/p' }]
-  const two = [...one, { forge: 'github' as const, project: 'o/r' }]
-  expect(resolveIssue('#42', one)).toEqual({ ref: { forge: 'gitlab', project: 'g/p', issue: 42 } })
+  const one = [{ forge: 'gitlab' as const, host: 'gitlab.com', project: 'g/p' }]
+  const two = [...one, { forge: 'github' as const, host: 'github.com', project: 'o/r' }]
+  expect(resolveIssue('#42', one)).toEqual({ ref: { forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: 42 } })
   for (const ps of [[], two]) {
     const r = resolveIssue('#42', ps)
     expect('error' in r && r.error).toContain('gitlab:group/name#42')
     expect('error' in r && r.error).toContain('github:owner/name#42')
   }
-  expect(resolveIssue('github:o/r#7', [])).toEqual({ ref: { forge: 'github', project: 'o/r', issue: 7 } })
-  expect(resolveIssue('gitlab:a/b/c#9', two)).toEqual({ ref: { forge: 'gitlab', project: 'a/b/c', issue: 9 } })
+  expect(resolveIssue('github:o/r#7', [])).toEqual({ ref: { forge: 'github', host: 'github.com', project: 'o/r', issue: 7 } })
+  expect(resolveIssue('gitlab:a/b/c#9', two)).toEqual({ ref: { forge: 'gitlab', host: 'gitlab.com', project: 'a/b/c', issue: 9 } })
   expect('error' in resolveIssue('gitlab:#9', one)).toBe(true)
   expect('error' in resolveIssue('#0', one)).toBe(true)
 })
@@ -62,9 +62,9 @@ test('decideSpec returns a structured result: posted with the job, or not posted
     getJob: async (ref: { issue: number }) => ({ ref, title: 'T', body: '', labels, comments: [] }),
     comment: async (_: unknown, body: string) => { posted.push(body); return { id: '1', body, createdAt: '', author: 'me' } },
   } as unknown as Forge
-  const env = { projects: [{ forge: 'gitlab', project: 'g/p' }], repoErrors: [], forgeFor: () => ({ forge }), deps: { secrets: [] } } as unknown as Env
+  const env = { projects: [{ forge: 'gitlab', host: 'gitlab.com', project: 'g/p' }], repoErrors: [], forgeFor: () => ({ forge }), deps: { secrets: [] } } as unknown as Env
   const ok = await decideSpec(env, { kind: 'revise', issue: '#4', notes: 'more tests' })
-  expect(ok).toEqual({ posted: true, ref: { forge: 'gitlab', project: 'g/p', issue: 4 }, text: 'gitlab:g/p#4: spec sent back for revision; the next tick moves it on' })
+  expect(ok).toEqual({ posted: true, ref: { forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: 4 }, text: 'gitlab:g/p#4: spec sent back for revision; the next tick moves it on' })
   expect(posted).toEqual(['/revise more tests'])
   labels = ['factory::build']
   const no = await decideSpec(env, { kind: 'approve', issue: '#4' })
@@ -85,12 +85,12 @@ test('final I5: /factory status ignores forged markers by another author (R6)', 
   ]
   const approve = { id: '5', body: '/approve', createdAt: at(4), author: 'alice', trusted: true }
   const make = (comments: unknown[], labels: string[]) => ({
-    listJobs: async () => [{ forge: 'gitlab', project: 'g/p', issue: 4 }],
+    listJobs: async () => [{ forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: 4 }],
     getJob: async (ref: unknown) => ({ ref, title: 'T', body: '', labels, comments }),
     whoami: async () => 'bot',
   }) as unknown as Forge
   const envOf = (forge: Forge) => ({
-    projects: [{ forge: 'gitlab', project: 'g/p' }], repoErrors: [], forgeFor: () => ({ forge }),
+    projects: [{ forge: 'gitlab', host: 'gitlab.com', project: 'g/p' }], repoErrors: [], forgeFor: () => ({ forge }),
     deps: { secrets: [], workerId: 'w1' }, isPaused: () => false,
   }) as unknown as Env
   // fix loops: forged failing verdict/report do not count

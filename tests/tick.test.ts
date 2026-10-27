@@ -29,11 +29,12 @@ function world(jobs: { issue: number; station: string; comments?: Comment[]; tit
   const w: World = { jobs: new Map(), log: [], clock: { now: T0 }, edits: [] }
   let seq = 0
   for (const j of jobs) {
-    const ref: JobRef = { forge: 'gitlab', project: 'g/p', issue: j.issue }
+    const ref: JobRef = { forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: j.issue }
     w.jobs.set(j.issue, { ref, title: j.title ?? `Job ${j.issue}`, body: '', labels: [`factory::${j.station}`], comments: j.comments ?? [] })
   }
   const forge: Forge = {
     listJobs: async () => [...w.jobs.values()].filter((j) => !j.labels.includes('factory::done')).map((j) => j.ref),
+    listJobsIn: async () => { throw new Error('unused') },
     getJob: async (ref) => JSON.parse(JSON.stringify(w.jobs.get(ref.issue)!)),
     comment: async (ref, body) => {
       const c: Comment = { id: `c${++seq}`, body, createdAt: iso(w.clock.now + seq), author: ME }
@@ -89,7 +90,7 @@ function world(jobs: { issue: number; station: string; comments?: Comment[]; tit
   return { w, deps, forge }
 }
 
-const projects = [{ forge: 'gitlab' as const, project: 'g/p' }]
+const projects = [{ forge: 'gitlab' as const, host: 'gitlab.com', project: 'g/p' }]
 const lease = (worker: string, untilMs: number, id = 'L', author = ME): Comment =>
   ({ id, body: `<!-- factory:lease worker=${worker} until=${iso(untilMs)} -->`, createdAt: iso(T0 - 5 * MIN), author })
 
@@ -98,7 +99,7 @@ test('two ready jobs with parallel:1 advances only one', async () => {
   const r = await tick({ ...deps, projects, parallel: 1 })
   const issues = new Set(r.advanced.map((a) => a.ref.issue))
   expect([...issues]).toEqual([1])
-  expect(r.skipped).toContainEqual({ ref: { forge: 'gitlab', project: 'g/p', issue: 2 }, reason: 'parallel limit reached' })
+  expect(r.skipped).toContainEqual({ ref: { forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: 2 }, reason: 'parallel limit reached' })
   expect(w.jobs.get(2)!.labels).toEqual(['factory::ready'])
   expect(w.jobs.get(2)!.comments).toEqual([])
 })
@@ -107,7 +108,7 @@ test('a job leased by another worker is skipped with "leased by <worker>"', asyn
   const { w, deps } = world([{ issue: 3, station: 'ready', comments: [lease('w2', T0 + 10 * MIN)] }])
   const r = await tick({ ...deps, projects, parallel: 2 })
   expect(r.advanced).toEqual([])
-  expect(r.skipped).toEqual([{ ref: { forge: 'gitlab', project: 'g/p', issue: 3 }, reason: 'leased by w2' }])
+  expect(r.skipped).toEqual([{ ref: { forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: 3 }, reason: 'leased by w2' }])
   expect(w.log).toEqual([])
 })
 
@@ -176,7 +177,7 @@ test('losing the lease race after acquiring skips the job', async () => {
   })
   const r = await tick({ ...deps, projects, parallel: 2 })
   expect(r.advanced).toEqual([])
-  expect(r.skipped).toEqual([{ ref: { forge: 'gitlab', project: 'g/p', issue: 12 }, reason: 'leased by w2' }])
+  expect(r.skipped).toEqual([{ ref: { forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: 12 }, reason: 'leased by w2' }])
   expect(w.jobs.get(12)!.labels).toEqual(['factory::ready'])
 })
 
@@ -195,7 +196,7 @@ test('forge errors during advance are reported as skipped, never thrown', async 
   const setStation = forge.setStation
   forge.setStation = async (ref, s) => { if (ref.issue === 14) throw new Error('bad gateway'); return setStation(ref, s) }
   const r = await tick({ ...deps, projects, parallel: 2 })
-  expect(r.skipped).toContainEqual({ ref: { forge: 'gitlab', project: 'g/p', issue: 14 }, reason: 'error: bad gateway' })
+  expect(r.skipped).toContainEqual({ ref: { forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: 14 }, reason: 'error: bad gateway' })
   expect(w.jobs.get(15)!.labels).toEqual(['factory::awaiting-spec'])
 })
 
@@ -203,12 +204,12 @@ test('a listing failure is reported per project', async () => {
   const { deps, forge } = world([])
   forge.listJobs = async () => { throw new Error('401 Unauthorized') }
   const r = await tick({ ...deps, projects, parallel: 2 })
-  expect(r.skipped).toEqual([{ ref: { forge: 'gitlab', project: 'g/p', issue: 0 }, reason: 'list failed: 401 Unauthorized' }])
+  expect(r.skipped).toEqual([{ ref: { forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: 0 }, reason: 'list failed: 401 Unauthorized' }])
 })
 
 test('only: restricts the tick to the given jobs', async () => {
   const { deps } = world([{ issue: 16, station: 'ready' }, { issue: 17, station: 'ready' }])
-  const r = await tick({ ...deps, projects, parallel: 2, only: [{ forge: 'gitlab', project: 'g/p', issue: 17 }] })
+  const r = await tick({ ...deps, projects, parallel: 2, only: [{ forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: 17 }] })
   expect([...new Set(r.advanced.map((a) => a.ref.issue))]).toEqual([17])
 })
 
@@ -226,11 +227,11 @@ test('loadRepoConfig reads .factory.yml at the default branch', async () => {
   const seen: string[] = []
   forge.defaultBranch = async () => 'trunk'
   forge.readFile = async (p, path, ref) => { seen.push(`${p}:${path}@${ref}`); return 'forge: gitlab\ntest: "make test"\n' }
-  const ok = await loadRepoConfig(forge, { forge: 'gitlab', project: 'g/p', issue: 1 })
+  const ok = await loadRepoConfig(forge, { forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: 1 })
   expect(seen).toEqual(['g/p:.factory.yml@trunk'])
   expect(ok.ok && ok.config.test).toBe('make test')
   forge.readFile = async () => null
-  expect(await loadRepoConfig(forge, { forge: 'gitlab', project: 'g/p', issue: 1 })).toEqual({ ok: false, error: 'no .factory.yml on trunk' })
+  expect(await loadRepoConfig(forge, { forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: 1 })).toEqual({ ok: false, error: 'no .factory.yml on trunk' })
 })
 
 test('a step longer than the renewal interval still renews (with a re-read) before the next step', async () => {

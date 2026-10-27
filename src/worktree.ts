@@ -14,7 +14,7 @@ export const NET_TIMEOUT_MS = 600000
  * repo's setup/test commands, git in a checkout) starts without the forge
  * credentials. Token-bearing git passes the token in the URL argument instead.
  */
-export const NO_TOKENS = ['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN']
+export const NO_TOKENS = ['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', '-u', 'FACTORY_TOKENS']
 
 // Every git command the mod runs ignores planted hooks (a pre-push hook would see
 // the token URL) and fsmonitor, and reads no global or system config (R21): only
@@ -48,7 +48,7 @@ export function branchName(ref: JobRef, title: string, prefix: string): string {
 }
 
 export function workDir(root: string, ref: JobRef): string {
-  return `${root}/${ref.forge}/${ref.project.replace(/\//g, '__')}/${ref.issue}`
+  return `${root}/${ref.forge}/${ref.host}/${ref.project.replace(/\//g, '__')}/${ref.issue}`
 }
 
 export async function ensureCheckout(

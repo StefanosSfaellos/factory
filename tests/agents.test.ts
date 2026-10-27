@@ -12,8 +12,8 @@ function after(argv: string[], flag: string): string | undefined {
 
 test('childArgv: env prefix, claude invocation and namespaced agent', () => {
   const a = childArgv({ ...base, role: 'planner' })
-  expect(a.slice(0, 18)).toEqual([
-    'env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN',
+  expect(a.slice(0, 20)).toEqual([
+    'env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', '-u', 'FACTORY_TOKENS',
     'FACTORY_ROLE=planner', 'FACTORY_JOB=gitlab:g/p#7', 'FACTORY_WORKTREE=/wt',
     'FACTORY_SPEC_FILE=/wt/.factory/spec.md', 'FACTORY_PROTECTED=', 'FACTORY_FORGE_HOSTS=', 'claude', '-p', 'do it',
   ])
@@ -43,7 +43,7 @@ test('childArgv: R23 Bash sandbox via --settings in the documented shape', () =>
       sandbox: {
         enabled: true,
         allowUnsandboxedCommands: false,
-        credentials: { envVars: [{ name: 'GITHUB_TOKEN', mode: 'deny' }, { name: 'GITLAB_TOKEN', mode: 'deny' }] },
+        credentials: { envVars: [{ name: 'GITHUB_TOKEN', mode: 'deny' }, { name: 'GITLAB_TOKEN', mode: 'deny' }, { name: 'FACTORY_TOKENS', mode: 'deny' }] },
       },
     })
   }
@@ -57,7 +57,7 @@ test('childArgv: passes protectedPaths to the child gate as FACTORY_PROTECTED', 
 test('childArgv: forge tokens are unset in the child (R18); forge hosts passed for the gate', () => {
   const a = childArgv({ ...base, role: 'builder', forgeHosts: ['github.com', 'api.github.com', 'lab.example.gr'] })
   const claude = a.indexOf('claude')
-  for (const v of ['GITHUB_TOKEN', 'GITLAB_TOKEN', 'GITLAB_URL', 'FACTORY_GITLAB_TOKEN']) {
+  for (const v of ['GITHUB_TOKEN', 'GITLAB_TOKEN', 'GITLAB_URL', 'FACTORY_GITLAB_TOKEN', 'FACTORY_TOKENS']) {
     const i = a.indexOf(v)
     expect(a[i - 1]).toBe('-u')
     expect(i).toBeLessThan(a.indexOf('FACTORY_ROLE=builder'))

@@ -1,15 +1,22 @@
 import { STATIONS } from '../types'
 import type { Comment, Job, JobRef, Station } from '../types'
+import { hostOf } from '../hosts'
 import { ForgeError } from './types'
 import type { Forge, HttpFn } from './types'
 
 const LABEL_PREFIX = 'factory::'
 const ALL_FACTORY_LABELS = [...STATIONS.map((s) => LABEL_PREFIX + s), LABEL_PREFIX + 'spec-approved']
+/** The labels a wildcard listing queries, one at a time: every station but done. */
+const ACTIVE_LABELS = STATIONS.filter((s) => s !== 'done').map((s) => LABEL_PREFIX + s)
 
 export function gitlabForge(http: HttpFn, opts: { baseUrl: string; token: string }): Forge {
   const root = opts.baseUrl.replace(/\/+$/, '')
   const api = root + '/api/v4'
   const host = root.replace(/^https?:\/\//, '')
+  /** The instance's lower-case host name: every JobRef it makes carries it. */
+  const hostName = hostOf(root)
+  /** project_id -> path_with_namespace, for issues listed without `references.full`. */
+  const projectPaths = new Map<number, Promise<string>>()
 
   async function call(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<any> {
     const headers: Record<string, string> = { 'PRIVATE-TOKEN': opts.token, Accept: 'application/json' }
@@ -63,7 +70,37 @@ export function gitlabForge(http: HttpFn, opts: { baseUrl: string; token: string
       for (const i of issues) {
         const labels: string[] = i.labels ?? []
         const active = labels.some((l) => l.startsWith(LABEL_PREFIX) && l !== LABEL_PREFIX + 'done')
-        if (active) refs.push({ forge: 'gitlab', project, issue: i.iid })
+        if (active) refs.push({ forge: 'gitlab', host: hostName, project, issue: i.iid })
+      }
+      return refs
+    },
+
+    async listJobsIn(scope) {
+      const base = scope.kind === 'all'
+        ? '/issues?scope=all&state=opened'
+        : `/groups/${encodeURIComponent(scope.path)}/issues?state=opened&include_subgroups=true`
+      const pathOf = async (i: any): Promise<string> => {
+        const full = i.references?.full
+        if (typeof full === 'string' && full.includes('#')) return full.replace(/#\d+$/, '')
+        const id = Number(i.project_id)
+        if (!Number.isSafeInteger(id)) return ''
+        if (!projectPaths.has(id)) {
+          const p = call('GET', `/projects/${id}`).then((x) => String(x?.path_with_namespace ?? ''))
+          p.catch(() => projectPaths.delete(id))
+          projectPaths.set(id, p)
+        }
+        return projectPaths.get(id)!
+      }
+      const seen = new Set<string>()
+      const refs: JobRef[] = []
+      for (const label of ACTIVE_LABELS) {
+        for (const i of await paged(`${base}&labels=${encodeURIComponent(label)}`)) {
+          const project = await pathOf(i)
+          const key = `${project}#${i.iid}`
+          if (project === '' || seen.has(key)) continue
+          seen.add(key)
+          refs.push({ forge: 'gitlab', host: hostName, project, issue: i.iid })
+        }
       }
       return refs
     },
@@ -100,7 +137,7 @@ export function gitlabForge(http: HttpFn, opts: { baseUrl: string; token: string
 
     async createIssue(project, title, body) {
       const i = await call('POST', `/projects/${pid(project)}/issues`, { title, description: body })
-      return { forge: 'gitlab', project, issue: i.iid }
+      return { forge: 'gitlab', host: hostName, project, issue: i.iid }
     },
 
     async openMR(ref, branch, title, body) {

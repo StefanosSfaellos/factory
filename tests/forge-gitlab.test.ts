@@ -19,7 +19,7 @@ function fake(routes: (req: Req) => { status?: number; json?: unknown; text?: st
   }
   return { calls, forge: gitlabForge(http, { baseUrl: BASE, token: 'tok' }) }
 }
-const ref = { forge: 'gitlab' as const, project: 'grp/app', issue: 7 }
+const ref = { forge: 'gitlab' as const, host: 'lab.ironcloud.gr', project: 'grp/app', issue: 7 }
 
 test('getJob maps issue and notes, sorted, system notes excluded', async () => {
   const { forge, calls } = fake((r) => {
@@ -113,7 +113,7 @@ test('comment, editComment, createIssue, whoami, cloneUrl', async () => {
   const put = calls.find((c) => c.method === 'PUT')!
   expect(put.url).toBe(`${A}/projects/grp%2Fapp/issues/7/notes/9`)
   expect(JSON.parse(put.body!)).toEqual({ body: 'edited' })
-  expect(await forge.createIssue('grp/app', 't', 'b')).toEqual({ forge: 'gitlab', project: 'grp/app', issue: 12 })
+  expect(await forge.createIssue('grp/app', 't', 'b')).toEqual({ forge: 'gitlab', host: 'lab.ironcloud.gr', project: 'grp/app', issue: 12 })
   expect(forge.cloneUrl('grp/app')).toBe('https://oauth2:tok@lab.ironcloud.gr/grp/app.git')
 })
 

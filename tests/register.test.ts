@@ -164,16 +164,38 @@ test('/factory run drives a station through $.process.run and $.process.spawn', 
   expect(g.issue.labels).toEqual(['factory::awaiting-spec'])
   expect(g.issue.notes.map((x) => x.body.split(' ')[0].split('\n')[0])).toEqual(['<!--', '<!--'])
   expect(g.issue.notes[1].body).toBe('<!-- factory:spec -->\n## Goal\nRound VAT.')
-  expect(spawned!.cwd).toBe('/home/u/.factory/work/gitlab/g__p/4')
+  expect(spawned!.cwd).toBe('/home/u/.factory/work/gitlab/gitlab.com/g__p/4')
   expect(spawned!.argv).toContain('--plugin-dir')
   // R21: the agent's dir is removed and cloned afresh from the forge.
-  expect(argvs[0]).toEqual(['rm', '-rf', '/home/u/.factory/work/gitlab/g__p/4'])
+  expect(argvs[0]).toEqual(['rm', '-rf', '/home/u/.factory/work/gitlab/gitlab.com/g__p/4'])
   expect(argvs.some((a) => a.includes('.mod') || a.some((w) => w.endsWith('.mod')))).toBe(false)
   // R18: the child never inherits the forge token.
   expect(spawned!.argv.slice(0, 7)).toEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL'])
   expect(spawned!.argv).toContain('FACTORY_FORGE_HOSTS=github.com,api.github.com,uploads.github.com,gitlab.com')
   // the lease note (id 1) is edited in place at the end: released with until = now
   expect(g.reqs.some((q) => q.method === 'PUT' && q.url.includes('/notes/1'))).toBe(true)
+})
+
+test('with several hosts, FACTORY_FORGE_HOSTS lists them all and the child loses FACTORY_TOKENS', { options: { repos: 'gitlab:g/p,gitlab:lab.b.gr/x/y', workerId: 'w1' } }, async ($, on) => {
+  let spawned: { argv: readonly string[]; cwd?: string } | undefined
+  mock.env(on, { GITLAB_TOKEN: 'glpat-abcdefghijklmnop', FACTORY_TOKENS: 'lab.b.gr=tok-b', HOME: '/home/u' })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  gitlab(on, 'spec')
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('process.spawn', async function* (_: unknown, e: { argv: readonly string[]; cwd?: string }) {
+    spawned = { argv: e.argv, cwd: e.cwd }
+    yield { stream: 'stdout' as const, text: '{"type":"result","subtype":"success","result":"## Goal\\nRound VAT."}\n' }
+    return { value: { code: 0, signal: null } }
+  } as any)
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  const r = await $.command.run({ command: 'factory', args: 'run gitlab:g/p#4' })
+  expect(r.text).toContain('gitlab:g/p#4: spec -> awaiting-spec (needs you)')
+  expect(spawned!.cwd).toBe('/home/u/.factory/work/gitlab/gitlab.com/g__p/4')
+  const claude = spawned!.argv.indexOf('claude')
+  expect(spawned!.argv.slice(0, claude).join(' ')).toContain('-u FACTORY_TOKENS')
+  expect(spawned!.argv).toContain('FACTORY_FORGE_HOSTS=github.com,api.github.com,uploads.github.com,gitlab.com,lab.b.gr')
+  expect(spawned!.argv).toContain('FACTORY_JOB=gitlab:gitlab.com/g/p#4')
 })
 
 test('a $.process.run timeout becomes timedOut, never a crash; other rejections carry the message', { options: { repos: 'gitlab:g/p', workerId: 'w1' } }, async ($, on) => {

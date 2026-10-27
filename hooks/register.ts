@@ -10,6 +10,7 @@ import { gate, type GateCtx } from '../src/gates'
 import type { Role } from '../src/config'
 import type { RunFn } from '../src/worktree'
 import { redact } from '../src/redact'
+import { forgeHostsOf, GITHUB_HOST, refLabel, resolveTokens, type Tokens } from '../src/hosts'
 import { notifyInfo, slackEvents, slackPayload } from '../src/notify'
 import type { JobRef, Station } from '../src/types'
 import { dossierMarkdown, isWorking, issueUrl, jobKey, latestSpec, loadViews, mergeProgress, sameRef, spinnerSuffix, transitionToast } from '../src/ui/model'
@@ -43,8 +44,13 @@ const messageAtom = atom({ plugin: 'software-factory', key: 'message' } as const
 const runningAtom = atom({ plugin: 'software-factory', key: 'running' } as const, [])
 
 type State = {
+  /** The plugin option `repos` as given; read again once GITLAB_URL's host is known. */
+  reposRaw: string
   projects: Env['projects']
+  /** Bad `repos` entries and bad FACTORY_TOKENS entries. */
   repoErrors: string[]
+  /** GITLAB_URL's host (default gitlab.com): GitLab entries and references without a host. */
+  gitlabHost: string
   workerId: string
   minutes: number
   paused: boolean
@@ -65,10 +71,14 @@ type State = {
 }
 
 export const register: Register = (on, options) => {
-  const repos = parseRepos(typeof options.repos === 'string' ? options.repos : '')
+  const reposRaw = typeof options.repos === 'string' ? options.repos : ''
+  // Parsed again at session start, against GITLAB_URL's host (env is read inside hooks only).
+  const repos = parseRepos(reposRaw)
   const st: State = {
+    reposRaw,
     projects: repos.projects,
     repoErrors: repos.errors,
+    gitlabHost: 'gitlab.com',
     // Resolved at session start: the default 'worker' would be shared by every machine.
     workerId: typeof options.workerId === 'string' ? options.workerId.trim() : '',
     minutes: typeof options.tickMinutes === 'number' && options.tickMinutes > 0 ? options.tickMinutes : DEFAULT_TICK_MINUTES,
@@ -89,7 +99,7 @@ export const register: Register = (on, options) => {
     // Child sessions (an agent the factory started): no commands, no ticker. Task 10 adds gates.
     if (await $.env.get('FACTORY_ROLE')) return started
     st.parent = true
-    st.secrets = await sessionSecrets($, st)
+    await loadHosts($, st)
     if (st.workerId === '' || st.workerId === 'worker') st.workerId = await sessionWorkerId($)
     await $.command.register({
       name: 'factory',
@@ -165,6 +175,7 @@ export const register: Register = (on, options) => {
       detail: detail ?? undefined,
       message: message ?? undefined,
       errors: [...errors, ...st.repoErrors],
+      gitlabHost: st.gitlabHost,
       empty: st.projects.length === 0 ? 'No repos configured. Set the plugin option "repos" (e.g. gitlab:group/name) in /config.' : undefined,
     })
   })
@@ -187,7 +198,7 @@ function openPane($: Engine): Promise<unknown> {
 /** Re-reads every configured project's jobs from the forge into `$.state`. */
 async function refresh($: Engine, st: State): Promise<void> {
   const env = await buildEnv($, st)
-  const r = await loadViews(st.projects, env.forgeFor, { now: await $.clock.now(), secrets: st.secrets })
+  const r = await loadViews(st.projects, env.forgeFor, { now: await $.clock.now(), secrets: st.secrets, gitlabHost: st.gitlabHost })
   await update($, jobsAtom, (prev) => mergeProgress(r.views, prev))
   await update($, errorsAtom, () => r.errors)
   await update($, loadedAtom, () => true)
@@ -200,7 +211,7 @@ function uiActions($: Engine, st: State): Actions {
     await update($, selectedAtom, () => jobKey(ref))
     await say(null)
     const env = await buildEnv($, st)
-    const f = env.forgeFor(ref.forge)
+    const f = env.forgeFor(ref)
     if ('error' in f) { await say(f.error); return }
     try {
       const raw = await f.forge.getJob(ref)
@@ -282,19 +293,18 @@ async function afterTick($: Engine, st: State, r: TickResult): Promise<void> {
  * Slack, once per transition into awaiting-spec, mr-open or blocked in this tick result.
  * Never throws: a failed post is logged (redacted, without the webhook) and dropped.
  */
-async function notifySlack($: Engine, st: State, r: TickResult, forges: Partial<Record<'github' | 'gitlab', Forge>>): Promise<void> {
+async function notifySlack($: Engine, st: State, r: TickResult, forgeFor: Env['forgeFor']): Promise<void> {
   try {
     const info = async (ref: JobRef) => {
-      const forge = forges[ref.forge]
-      if (!forge) throw new Error(`no ${ref.forge} forge`)
-      const raw = await forge.getJob(ref)
-      const job = { ...raw, comments: ownMarkersOnly(raw.comments, await forge.whoami()) }
-      const project = st.projects.find((p) => p.forge === ref.forge && p.project === ref.project)
-      return notifyInfo(job, issueUrl(forge.publicUrl(project?.project ?? ref.project), ref))
+      const f = forgeFor(ref)
+      if ('error' in f) throw new Error(f.error)
+      const raw = await f.forge.getJob(ref)
+      const job = { ...raw, comments: ownMarkersOnly(raw.comments, await f.forge.whoami()) }
+      return notifyInfo(job, issueUrl(f.forge.publicUrl(ref.project), ref))
     }
     for (const ev of await slackEvents(r.advanced, info)) {
       try {
-        const res = await $.http.fetch(st.webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: slackPayload(ev, st.secrets) })
+        const res = await $.http.fetch(st.webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: slackPayload(ev, st.secrets, st.gitlabHost) })
         if (!res.ok) $.ui.log(`factory slack: webhook answered ${res.status}`, { to: 'debug' })
       } catch (err) {
         $.ui.log(redact(`factory slack: post failed: ${err instanceof Error ? err.message : String(err)}`, st.secrets), { to: 'debug' })
@@ -319,8 +329,24 @@ async function progressed($: Engine, st: State, ref: JobRef, text: string): Prom
   await update($, jobsAtom, (jobs) => jobs.map((j) => (sameRef(j.ref, ref) ? { ...j, progress: line } : j)))
 }
 
-async function sessionSecrets($: Engine, st: State): Promise<string[]> {
-  return [(await $.env.get('GITHUB_TOKEN')) ?? '', (await $.env.get('GITLAB_TOKEN')) ?? '', st.webhook].filter((s) => s !== '')
+/**
+ * Reads the four token variables (GITHUB_TOKEN, GITLAB_TOKEN, GITLAB_URL, FACTORY_TOKENS),
+ * resolves one token per host, and re-reads `repos` against GITLAB_URL's host. Every token
+ * (and every bad FACTORY_TOKENS entry) becomes a redaction secret.
+ */
+async function loadHosts($: Engine, st: State): Promise<Tokens> {
+  const tokens = resolveTokens({
+    github: (await $.env.get('GITHUB_TOKEN')) ?? '',
+    gitlab: (await $.env.get('GITLAB_TOKEN')) ?? '',
+    gitlabUrl: (await $.env.get('GITLAB_URL')) ?? '',
+    factory: (await $.env.get('FACTORY_TOKENS')) ?? '',
+  })
+  const repos = parseRepos(st.reposRaw, { gitlabHost: tokens.gitlabHost })
+  st.gitlabHost = tokens.gitlabHost
+  st.projects = repos.projects
+  st.repoErrors = [...repos.errors, ...tokens.errors]
+  st.secrets = [...tokens.secrets, st.webhook].filter((x) => x !== '')
+  return tokens
 }
 
 async function gateCtx($: Engine, role: Role, spec: { path?: string; text?: string }): Promise<GateCtx> {
@@ -342,11 +368,8 @@ async function gateCtx($: Engine, role: Role, spec: { path?: string; text?: stri
 
 async function buildEnv($: Engine, st: State): Promise<Env> {
   if (st.workerId === '' || st.workerId === 'worker') st.workerId = await sessionWorkerId($)
-  const githubToken = (await $.env.get('GITHUB_TOKEN')) ?? ''
-  const gitlabToken = (await $.env.get('GITLAB_TOKEN')) ?? ''
-  const gitlabUrl = (await $.env.get('GITLAB_URL')) || 'https://gitlab.com'
+  const tokens = await loadHosts($, st)
   const home = (await $.env.get('HOME')) ?? ''
-  st.secrets = [githubToken, gitlabToken, st.webhook].filter((x) => x !== '')
   // Only the user's own interactive session draws: toasts, views, the spinner.
   const ui = st.parent && st.interactive
 
@@ -391,17 +414,24 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
     return { exitCode: end.code ?? -1 }
   }
 
-  const forges: Partial<Record<'github' | 'gitlab', Forge>> = {}
-  if (githubToken) forges.github = githubForge(http, { token: githubToken })
-  if (gitlabToken) forges.gitlab = gitlabForge(http, { baseUrl: gitlabUrl, token: gitlabToken })
+  // One forge client per (kind, host) with a token, made on first use.
+  const forges = new Map<string, Forge>()
+  const forgeFor: Env['forgeFor'] = (at) => {
+    const key = `${at.forge}|${at.host}`
+    const have = forges.get(key)
+    if (have) return { forge: have }
+    const t = tokens.hosts[at.host]
+    if (!t || (at.forge === 'github') !== (at.host === GITHUB_HOST)) return { error: tokens.missing(at.forge, at.host) }
+    const f = at.forge === 'github' ? githubForge(http, { token: t.token }) : gitlabForge(http, { baseUrl: t.baseUrl, token: t.token })
+    forges.set(key, f)
+    return { forge: f }
+  }
 
   return {
     projects: st.projects,
     repoErrors: st.repoErrors,
-    forgeFor: (kind) => {
-      const f = forges[kind]
-      return f ? { forge: f } : { error: `${kind === 'github' ? 'GITHUB_TOKEN' : 'GITLAB_TOKEN'} is not set` }
-    },
+    gitlabHost: st.gitlabHost,
+    forgeFor,
     deps: {
       run,
       spawn,
@@ -409,10 +439,10 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
       workRoot: `${home}/.factory/work`,
       secrets: st.secrets,
       workerId: st.workerId,
-      forgeHosts: forgeHostsOf(gitlabUrl),
+      forgeHosts: forgeHostsOf(tokens, st.projects),
       now: () => Date.now(),
       onProgress: (ref, text) => {
-        $.ui.log(`factory ${ref.forge}:${ref.project}#${ref.issue}: ${text}`, { to: 'debug' })
+        $.ui.log(`factory ${refLabel(ref, st.gitlabHost)}: ${text}`, { to: 'debug' })
         if (ui) enqueue(st, async () => {
           await progressed($, st, ref, text)
           // $.state writes redraw their readers; the brief also asks for an explicit invalidate here.
@@ -433,18 +463,12 @@ async function buildEnv($: Engine, st: State): Promise<Env> {
     isPaused: () => st.paused,
     onTick: ui || st.webhook !== ''
       ? async (r) => {
-        if (st.webhook !== '') await notifySlack($, st, r, forges)
+        if (st.webhook !== '') await notifySlack($, st, r, forgeFor)
         if (ui) await afterTick($, st, r)
       }
       : undefined,
     onStep: ui ? (ref, station) => enqueue(st, () => stepChanged($, ref, station && isWorking(station) ? station : null)) : undefined,
   }
-}
-
-/** Hosts the builder gate treats as the forge: GitHub's and the configured GitLab's. */
-function forgeHostsOf(gitlabUrl: string): string[] {
-  const gitlab = gitlabUrl.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/^[^@/]*@/, '').replace(/[/:?#].*$/, '').toLowerCase()
-  return [...new Set(['github.com', 'api.github.com', 'uploads.github.com', gitlab].filter((h) => h !== ''))]
 }
 
 async function timedTick($: Engine, st: State): Promise<void> {

@@ -12,7 +12,7 @@ const ME = 'factory-bot'
 /** A repo-controlled shell run (`env -u ... sh -c <cmd>`). */
 const isSh = (argv: string[]) => { const i = argv.indexOf('sh'); return i >= 0 && argv[i + 1] === '-c' }
 const SECRET = 'sekrit-token-value'
-const ref: JobRef = { forge: 'gitlab', project: 'g/p', issue: 7 }
+const ref: JobRef = { forge: 'gitlab', host: 'gitlab.com', project: 'g/p', issue: 7 }
 const cfg: RepoConfig = {
   forge: 'gitlab', test: 'npm test', reviewers: ['code', 'security'], protectedPaths: [],
   models: {}, limits: { fixLoops: 3, parallel: 2 }, branchPrefix: 'factory/', allowedTools: [], sandbox: { allowedDomains: [], required: false },
@@ -56,6 +56,7 @@ function setup(station: string, comments: Comment[] = [], opts: {
   const counts = { openMR: 0, findOpenMR: 0 }
   const forge: Forge = {
     listJobs: async () => [ref],
+    listJobsIn: async () => [ref],
     getJob: async () => { const { head: _h, ...j } = JSON.parse(JSON.stringify(state)); return j },
     comment: async (_r, body) => {
       if (commentFailures > 0) { commentFailures--; throw new ForgeError(502, 'bad gateway') }
@@ -151,7 +152,7 @@ test('spec posts spec marker then labels awaiting-spec, redacted', async () => {
   expect(body.startsWith('<!-- factory:spec')).toBe(true)
   expect(body).not.toContain(SECRET)
   expect(body).toContain('[redacted]')
-  expect(s.cwds['spec-writer'][0]).toBe('/work/gitlab/g__p/7')
+  expect(s.cwds['spec-writer'][0]).toBe('/work/gitlab/gitlab.com/g__p/7')
 })
 
 test('forged spec marker by another author is ignored (spec-writer still runs)', async () => {
@@ -208,13 +209,13 @@ test('build writes spec file, excludes .factory/, requires BUILD-DONE and pushes
   const s = setup('build', dossier(), { agents: { builder: 'did it\nBUILD-DONE' } })
   const r = await advance(ref, s.deps)
   expect(r.to).toBe('verify')
-  expect(s.files['/work/gitlab/g__p/7/.factory/spec.md']).toBe('## Goal\nRound VAT.')
-  expect(s.files['/work/gitlab/g__p/7/.git/info/exclude']).toContain('.factory/')
-  expect(s.runs).toContainEqual(['mkdir', '-p', '/work/gitlab/g__p/7/.factory'])
+  expect(s.files['/work/gitlab/gitlab.com/g__p/7/.factory/spec.md']).toBe('## Goal\nRound VAT.')
+  expect(s.files['/work/gitlab/gitlab.com/g__p/7/.git/info/exclude']).toContain('.factory/')
+  expect(s.runs).toContainEqual(['mkdir', '-p', '/work/gitlab/gitlab.com/g__p/7/.factory'])
   const push = s.runs.find((a) => a.includes('push'))!
   expect(push.slice(-2)).toEqual([`https://oauth2:${SECRET}@host/g/p.git`, 'refs/factory/build:refs/heads/factory/7-add-vat-rounding'])
-  expect(push[push.indexOf('-C') + 1]).toMatch(/^\/work\/gitlab\/g__p\/7\.bare-[0-9a-f]{12}$/)
-  expect(s.runs).toContainEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/work/gitlab/g__p/7', 'remote', 'set-url', 'origin', 'https://host/g/p.git'])
+  expect(push[push.indexOf('-C') + 1]).toMatch(/^\/work\/gitlab\/gitlab\.com\/g__p\/7\.bare-[0-9a-f]{12}$/)
+  expect(s.runs).toContainEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', '-u', 'FACTORY_TOKENS', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/work/gitlab/gitlab.com/g__p/7', 'remote', 'set-url', 'origin', 'https://host/g/p.git'])
   expect(s.log).toEqual(['label:verify'])
 })
 
@@ -255,7 +256,7 @@ test('review: code pass + security fail -> two verdicts, back to build', async (
   expect(s.log.at(-1)).toBe('label:build')
   expect(s.prompts['code-reviewer'][0]).toContain('.factory/branch.diff')
   expect(s.prompts['code-reviewer'][0]).not.toContain('git diff')
-  expect(s.cwds['security-reviewer'][0]).toBe('/work/gitlab/g__p/7')
+  expect(s.cwds['security-reviewer'][0]).toBe('/work/gitlab/gitlab.com/g__p/7')
 })
 
 test('review: all pass -> approve', async () => {
@@ -615,13 +616,13 @@ test('push and empty re-verify commit run git with hooks disabled', async () => 
   }
   for (const argv of s.runs.filter((a) => a.includes('git'))) {
     expect(argv).toContain('core.hooksPath=/dev/null')
-    expect(argv.slice(0, 11)).toEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1'])
+    expect(argv.slice(0, 13)).toEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', '-u', 'FACTORY_TOKENS', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1'])
   }
 })
 
 // ---- Task 10 fix round 2: R21 (fresh bare repos), R22 (.factory) ----
-const WT = '/work/gitlab/g__p/7'
-const BARE = /^\/work\/gitlab\/g__p\/7\.bare-[0-9a-f]{12}$/
+const WT = '/work/gitlab/gitlab.com/g__p/7'
+const BARE = /^\/work\/gitlab\/gitlab\.com\/g__p\/7\.bare-[0-9a-f]{12}$/
 const dirOf = (argv: string[]) => { const i = argv.indexOf('-C'); return i < 0 ? undefined : argv[i + 1] }
 const gitRuns = (runs: string[][]) => runs.filter((a) => a.includes('git'))
 
@@ -639,8 +640,8 @@ test('R21: push and commit-tree run in a fresh bare repo, never the agent dir or
   expect(dirOf(ct)).toBe(dirOf(push))
   const bare = dirOf(push)!
   const init = s.runs.findIndex((a) => a.includes('init') && a.includes(bare))
-  expect(s.runs[init]).toEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/', 'init', '--bare', '--quiet', bare])
-  expect(s.runs).toContainEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', bare, 'fetch', '--no-tags', WT, '+HEAD:refs/factory/build'])
+  expect(s.runs[init]).toEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', '-u', 'FACTORY_TOKENS', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/', 'init', '--bare', '--quiet', bare])
+  expect(s.runs).toContainEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', '-u', 'FACTORY_TOKENS', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', bare, 'fetch', '--no-tags', WT, '+HEAD:refs/factory/build'])
   const removed = s.runs.findIndex((a) => a[0] === 'rm' && a.at(-1) === bare)
   expect(removed).toBeGreaterThan(s.runs.indexOf(push))
   // no checkout ever runs in the bare repo (no smudge filters)

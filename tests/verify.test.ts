@@ -4,7 +4,7 @@ import type { RunFn } from '../src/worktree'
 import type { RepoConfig } from '../src/config'
 
 const cfg = { test: 'npm test', setup: 'npm ci', branchPrefix: 'factory/' } as RepoConfig
-const NO_TOKENS = ['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN']
+const NO_TOKENS = ['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', '-u', 'FACTORY_TOKENS']
 /** The shell command of a repo-controlled run (`... sh -c <cmd>`), or undefined. */
 const shOf = (argv: string[]) => { const i = argv.indexOf('sh'); return i >= 0 && argv[i + 1] === '-c' ? argv[i + 2] : undefined }
 const base = { cloneUrl: 'https://x:tok123@host/r.git', publicUrl: 'https://host/r.git', branch: 'b', scratchDir: '/s', cfg, secrets: ['tok123'] }
@@ -28,7 +28,7 @@ test('passes on exit 0', async () => {
   expect(r.passed).toBe(true)
   expect(r.report.split('\n')[0]).toBe('<!-- factory:test-report passed=true -->')
   expect(f.calls[0]).toEqual(['rm', '-rf', '/s'])
-  expect(f.calls[1]).toEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/', 'clone', '--depth', '1', '--branch', 'b', base.cloneUrl, '/s'])
+  expect(f.calls[1]).toEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', '-u', 'FACTORY_TOKENS', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/', 'clone', '--depth', '1', '--branch', 'b', base.cloneUrl, '/s'])
 })
 test('fails on exit 1 with log tail', async () => {
   const lines = Array.from({ length: 100 }, (_, i) => 'line' + i).join('\n')
@@ -128,7 +128,7 @@ test('clone is followed immediately by set-url to the tokenless url', async () =
   const f = fake(() => ({ exitCode: 0 }))
   await verify(f.run, base)
   const i = f.calls.findIndex((c) => c.includes('clone'))
-  expect(f.calls[i + 1]).toEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/s', 'remote', 'set-url', 'origin', 'https://host/r.git'])
+  expect(f.calls[i + 1]).toEqual(['env', '-u', 'GITHUB_TOKEN', '-u', 'GITLAB_TOKEN', '-u', 'GITLAB_URL', '-u', 'FACTORY_GITLAB_TOKEN', '-u', 'FACTORY_TOKENS', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_NOSYSTEM=1', 'git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', '/s', 'remote', 'set-url', 'origin', 'https://host/r.git'])
 })
 
 test('report records the tested commit sha', async () => {

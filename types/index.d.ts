@@ -5,7 +5,7 @@ export type FactoryStation =
   | 'ready' | 'spec' | 'awaiting-spec' | 'design' | 'plan' | 'build'
   | 'verify' | 'review' | 'approve' | 'mr-open' | 'done' | 'blocked'
 
-export type FactoryJobRef = { forge: 'github' | 'gitlab'; project: string; issue: number }
+export type FactoryJobRef = { forge: 'github' | 'gitlab'; host: string; project: string; issue: number }
 
 export type FactoryJobView = {
   ref: FactoryJobRef
